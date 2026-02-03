@@ -4,11 +4,14 @@ import setproctitle
 from pathlib import Path
 from typing import Optional, Any
 import hailo
+import json
+import tempfile
+import os
 
 # Local application-specific imports
 from hailo_apps.python.core.common.core import get_pipeline_parser, handle_list_models_flag
 from hailo_apps.python.core.common.defines import TILING_APP_TITLE, TILING_PIPELINE
-from hailo_apps.python.core.gstreamer.gstreamer_helper_pipelines import SOURCE_PIPELINE, FILE_READER_PIPELINE, INFERENCE_PIPELINE, USER_CALLBACK_PIPELINE, DISPLAY_PIPELINE, TILE_CROPPER_PIPELINE
+from hailo_apps.python.core.gstreamer.gstreamer_helper_pipelines import SOURCE_PIPELINE, INFERENCE_PIPELINE, USER_CALLBACK_PIPELINE, DISPLAY_PIPELINE, TILE_CROPPER_PIPELINE
 from hailo_apps.python.core.gstreamer.gstreamer_app import GStreamerApp, app_callback_class, dummy_callback
 from hailo_apps.python.core.common.hailo_logger import get_logger
 from hailo_apps.python.pipeline_apps.tiling.configuration import TilingConfiguration
@@ -53,7 +56,7 @@ class GStreamerTilingApp(GStreamerApp):
 
         # Copy configuration attributes to self for compatibility
         self._copy_config_attributes()
-        user_data.detection_log_file = f"results/{Path(self.hef_path).stem}_tiling_{self.config.tiles_x}x{self.config.tiles_y}_{self.frame_rate}fps_{Path(self.video_source).stem}_detections.log"
+        user_data.detection_log_file = f"results/{Path(self.hef_path).stem}_{self.frame_rate}fps_{Path(self.video_source).stem}_t{self.config.tiles_x}x{self.config.tiles_y}_detections.log"
         # User-defined label JSON file
         self.fps_log_file = f"results/{Path(self.hef_path).stem}_tiling_{self.config.tiles_x}x{self.config.tiles_y}_{self.frame_rate}fps_{Path(self.video_source).stem}.log"
         self.labels_json = self.options_menu.labels_json
@@ -61,6 +64,32 @@ class GStreamerTilingApp(GStreamerApp):
             self.labels_json = get_hef_labels_json(self.hef_path)
             if self.labels_json is not None:
                 hailo_logger.info("Auto detected Labels JSON: %s", self.labels_json)
+
+        # Force yellow color for detections
+        if self.labels_json and os.path.exists(self.labels_json):
+            try:
+                with open(self.labels_json, 'r') as f:
+                    labels = json.load(f)
+                
+                # Check if it's the expected format (list of dicts)
+                if isinstance(labels, list):
+                    modified = False
+                    for label in labels:
+                        if 'color' in label:
+                            # Set color to Yellow [255, 255, 0]
+                            label['color'] = [255, 255, 0]
+                            modified = True
+                    
+                    if modified:
+                        # Create temp file
+                        fd, temp_path = tempfile.mkstemp(suffix='.json', prefix='hailo_labels_yellow_')
+                        with os.fdopen(fd, 'w') as f:
+                            json.dump(labels, f, indent=4)
+                        
+                        hailo_logger.info(f"Created temporary labels JSON with yellow colors: {temp_path}")
+                        self.labels_json = temp_path
+            except Exception as e:
+                hailo_logger.warning(f"Failed to patch labels JSON for yellow color: {e}")
 
         self.app_callback = app_callback
         setproctitle.setproctitle(TILING_APP_TITLE)
@@ -105,6 +134,9 @@ class GStreamerTilingApp(GStreamerApp):
         # Codec options
         parser.add_argument("--input-codec", type=str, default="auto", choices=['auto', 'h264', 'h265', 'hevc'],
                           help="Force specific codec for hardware decoding (e.g. h265 for RPi hardware). Default: auto")
+        
+        # Display options
+        parser.add_argument("--no-display", action="store_true", help="Disable display window (headless mode)")
 
     def _copy_config_attributes(self) -> None:
         """Copy configuration attributes to self for compatibility."""
@@ -140,6 +172,7 @@ class GStreamerTilingApp(GStreamerApp):
         self.nms_score_threshold = self.config.nms_score_threshold
         self.border_threshold = self.config.border_threshold
         self.input_codec = getattr(self.options_menu, 'input_codec', 'auto')
+        self.no_display = getattr(self.options_menu, 'no_display', False)
 
         # Frame rate adjustment for hailo8l with mobilenet
         if self.model_type == "mobilenet" and self.arch != 'hailo8' and self.batch_size == 15:
@@ -265,18 +298,25 @@ class GStreamerTilingApp(GStreamerApp):
 
         user_callback_pipeline = USER_CALLBACK_PIPELINE()
 
-        display_pipeline = DISPLAY_PIPELINE(
-            video_sink=self.video_sink,
-            sync=self.sync,
-            show_fps=self.show_fps
-        )
+        if self.no_display:
+            # Use fakesink for headless execution
+            # sync=true to respect framerate, sync=false for max speed
+            # User might want max speed if analyzing file, but let's stick to 'self.sync' which depends on input type
+            output_pipeline = f"fakesink sync={self.sync}"
+        else:
+            output_pipeline = DISPLAY_PIPELINE(
+                video_sink=self.video_sink,
+                sync=self.sync,
+                show_fps=self.show_fps
+            )
 
         pipeline_string = (
             f'{source_pipeline} ! '
             f'{tile_cropper_pipeline} ! '
             f'{user_callback_pipeline} ! '
-            f'{display_pipeline}'
+            f'{output_pipeline}'
         )
+        
 
         hailo_logger.debug(f"Pipeline string: {pipeline_string}")
         return pipeline_string
