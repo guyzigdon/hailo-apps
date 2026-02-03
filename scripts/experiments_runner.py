@@ -65,7 +65,7 @@ def start_screen_recording(output_file, display_info):
         'ffmpeg',
         '-f', 'x11grab',
         '-video_size', f'{cap_w}x{cap_h}',
-        '-framerate', '30',
+        '-framerate', '60',
         '-i', f"{display_info['display']}.0+{offset_x},{offset_y}",
         '-c:v', 'libx264',
         '-preset', 'fast',
