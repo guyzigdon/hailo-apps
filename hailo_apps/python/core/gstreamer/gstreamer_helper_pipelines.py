@@ -74,6 +74,7 @@ def SOURCE_PIPELINE(
     sync=True,
     video_format="RGB",
     mirror_image=True,
+    input_codec="auto",
 ):
     """Creates a GStreamer pipeline string for the video source with a separate fps caps
     for frame rate control.
@@ -85,6 +86,7 @@ def SOURCE_PIPELINE(
         video_format (str, optional): The video format. Defaults to 'RGB'.
         name (str, optional): The prefix name for the pipeline elements. Defaults to 'source'.
         mirror_image (bool, optional): Whether to horizontally mirror the image (for camera sources). Defaults to True.
+        input_codec (str, optional): Input video codec ('auto', 'h264', 'h265', 'hevc'). Defaults to 'auto'.
 
     Returns:
         str: A string representing the GStreamer pipeline for the video source.
@@ -134,11 +136,47 @@ def SOURCE_PIPELINE(
             f'decodebin name={name}_decodebin ! '
         )
     else:
-        source_element = (
-            f'filesrc location="{video_source}" name={name} ! '
-            f"{QUEUE(name=f'{name}_queue_decode')} ! "
-            f"decodebin name={name}_decodebin ! "
-        )
+        # File source handling
+        if input_codec != "auto":
+            # Determine container demuxer
+            demuxer = ""
+            if video_source.lower().endswith('.mkv'):
+                demuxer = f"matroskademux name={name}_demux"
+            elif video_source.lower().endswith(('.mp4', '.mov')):
+                demuxer = f"qtdemux name={name}_demux"
+            
+            # Determine decoder pipeline
+            decoder_pipe = ""
+            if demuxer:
+                if input_codec == "h264":
+                    # Fallback to software decoding or specific element if known (v4l2h264dec not found)
+                    # Use decodebin or explicit software decoder if hardware is missing
+                    decoder_pipe = f"{demuxer} ! h264parse ! avdec_h264"
+                elif input_codec in ["h265", "hevc"]:
+                    # Use the stateless decoder found on the system
+                    # Note: v4l2slh265dec on some RPi systems doesn't support capture-io-mode
+                    decoder_pipe = f"{demuxer} ! h265parse ! v4l2slh265dec"
+            
+            if decoder_pipe:
+                source_element = (
+                    f'filesrc location="{video_source}" name={name} ! '
+                    f"{QUEUE(name=f'{name}_queue_decode')} ! "
+                    f"{decoder_pipe} ! "
+                )
+            else:
+                # Fallback to decodebin if codec logic fails (e.g. unknown extension)
+                source_element = (
+                    f'filesrc location="{video_source}" name={name} ! '
+                    f"{QUEUE(name=f'{name}_queue_decode')} ! "
+                    f"decodebin name={name}_decodebin ! "
+                )
+        else:
+            # Auto mode (default decodebin)
+            source_element = (
+                f'filesrc location="{video_source}" name={name} ! '
+                f"{QUEUE(name=f'{name}_queue_decode')} ! "
+                f"decodebin name={name}_decodebin ! "
+            )
 
     # Set up the fps caps.
     # If sync is True, constrain the rate with the given frame_rate.

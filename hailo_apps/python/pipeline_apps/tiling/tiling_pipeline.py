@@ -3,11 +3,12 @@
 import setproctitle
 from pathlib import Path
 from typing import Optional, Any
+import hailo
 
 # Local application-specific imports
 from hailo_apps.python.core.common.core import get_pipeline_parser, handle_list_models_flag
 from hailo_apps.python.core.common.defines import TILING_APP_TITLE, TILING_PIPELINE
-from hailo_apps.python.core.gstreamer.gstreamer_helper_pipelines import SOURCE_PIPELINE, INFERENCE_PIPELINE, USER_CALLBACK_PIPELINE, DISPLAY_PIPELINE, TILE_CROPPER_PIPELINE
+from hailo_apps.python.core.gstreamer.gstreamer_helper_pipelines import SOURCE_PIPELINE, FILE_READER_PIPELINE, INFERENCE_PIPELINE, USER_CALLBACK_PIPELINE, DISPLAY_PIPELINE, TILE_CROPPER_PIPELINE
 from hailo_apps.python.core.gstreamer.gstreamer_app import GStreamerApp, app_callback_class, dummy_callback
 from hailo_apps.python.core.common.hailo_logger import get_logger
 from hailo_apps.python.pipeline_apps.tiling.configuration import TilingConfiguration
@@ -27,6 +28,9 @@ hailo_logger = get_logger(__name__)
 
 # This class inherits from the hailo_rpi_common.GStreamerApp class
 class GStreamerTilingApp(GStreamerApp):
+    nms_score_threshold: float = None
+
+    
     def __init__(self, app_callback: Any, user_data: Any, parser: Optional[Any] = None) -> None:
         if parser is None:
             parser = get_pipeline_parser()
@@ -38,7 +42,7 @@ class GStreamerTilingApp(GStreamerApp):
         handle_list_models_flag(parser, TILING_PIPELINE)
 
         super().__init__(parser, user_data)
-
+    
         # Initialize tiling configuration
         self.config = TilingConfiguration(
             self.options_menu,
@@ -49,8 +53,9 @@ class GStreamerTilingApp(GStreamerApp):
 
         # Copy configuration attributes to self for compatibility
         self._copy_config_attributes()
-
+        user_data.detection_log_file = f"results/{Path(self.hef_path).stem}_tiling_{self.config.tiles_x}x{self.config.tiles_y}_{self.frame_rate}fps_{Path(self.video_source).stem}_detections.log"
         # User-defined label JSON file
+        self.fps_log_file = f"results/{Path(self.hef_path).stem}_tiling_{self.config.tiles_x}x{self.config.tiles_y}_{self.frame_rate}fps_{Path(self.video_source).stem}.log"
         self.labels_json = self.options_menu.labels_json
         if self.labels_json is None: # if no labels JSON file is provided, try auto-detect it from the HEF file
             self.labels_json = get_hef_labels_json(self.hef_path)
@@ -92,8 +97,14 @@ class GStreamerTilingApp(GStreamerApp):
         # Detection options
         parser.add_argument("--iou-threshold", type=float, default=0.3,
                           help="NMS IOU threshold (default: 0.3)")
+        parser.add_argument("--nms-score-threshold", type=float, default=None,
+                          help="NMS Score threshold (default: 0.001 if not specified)")
         parser.add_argument("--border-threshold", type=float, default=0.15,
                           help="Border threshold for multi-scale mode (default: 0.15)")
+        
+        # Codec options
+        parser.add_argument("--input-codec", type=str, default="auto", choices=['auto', 'h264', 'h265', 'hevc'],
+                          help="Force specific codec for hardware decoding (e.g. h265 for RPi hardware). Default: auto")
 
     def _copy_config_attributes(self) -> None:
         """Copy configuration attributes to self for compatibility."""
@@ -126,7 +137,9 @@ class GStreamerTilingApp(GStreamerApp):
 
         # Detection configuration
         self.iou_threshold = self.config.iou_threshold
+        self.nms_score_threshold = self.config.nms_score_threshold
         self.border_threshold = self.config.border_threshold
+        self.input_codec = getattr(self.options_menu, 'input_codec', 'auto')
 
         # Frame rate adjustment for hailo8l with mobilenet
         if self.model_type == "mobilenet" and self.arch != 'hailo8' and self.batch_size == 15:
@@ -180,6 +193,7 @@ class GStreamerTilingApp(GStreamerApp):
         print(f"\nDetection Parameters:")
         print(f"  Batch Size:         {self.batch_size}")
         print(f"  IOU Threshold:      {self.iou_threshold}")
+        print(f"  NMS Score Threshold: {self.nms_score_threshold}")
         if self.use_multi_scale:
             print(f"  Border Threshold:   {self.border_threshold}")
 
@@ -211,14 +225,19 @@ class GStreamerTilingApp(GStreamerApp):
             video_height=self.video_height,
             frame_rate=self.frame_rate,
             sync=self.sync,
+            input_codec=self.input_codec,
         )
 
+        # Default to 0.001 if not specified (original behavior)
+        nms_score_thresh = self.nms_score_threshold if self.nms_score_threshold is not None else 0.001
+        
         detection_pipeline = INFERENCE_PIPELINE(
             hef_path=self.hef_path,
             post_process_so=self.post_process_so,
             post_function_name=self.post_function,
             batch_size=self.batch_size,
-            config_json=self.labels_json
+            config_json=self.labels_json,
+            additional_params=f"nms-score-threshold={nms_score_thresh}"
         )
 
         # Configure tile cropper with calculated parameters
@@ -262,10 +281,46 @@ class GStreamerTilingApp(GStreamerApp):
         hailo_logger.debug(f"Pipeline string: {pipeline_string}")
         return pipeline_string
 
+# User-defined class to be used in the callback function: Inheritance from the app_callback_class
+class user_app_callback_class(app_callback_class):
+    detection_log_file: str = ""
+
+    def __init__(self):
+        super().__init__()
+
+
+
+# User-defined callback function: This is the callback function that will be called when data is available from the pipeline
+def app_callback(element, buffer, user_data):
+    # Note: Frame counting is handled automatically by the framework wrapper
+    # Log absolute timestamp if available
+    pts = buffer.pts
+    timestamp_str = ""
+    if pts is not None:
+        seconds = pts / 1e9
+        timestamp_str = f" | Timestamp: {seconds:.3f}s"
+    
+    string_to_print = f"Frame count: {user_data.get_count()}{timestamp_str}\n"
+    
+    if buffer is None:
+        hailo_logger.warning("Received None buffer at frame=%s", user_data.get_count())
+        return
+    
+    log_filename = user_data.detection_log_file
+    with open(log_filename, "a") as log_file:
+        for detection in hailo.get_roi_from_buffer(buffer).get_objects_typed(hailo.HAILO_DETECTION):
+            string_to_print += (f"Detection: {detection.get_label()} Confidence: {detection.get_confidence():.2f}\n")
+            bbox = detection.get_bbox()
+            string_to_print += (f"\tBbox: x_min={bbox.xmin()}, y_min={bbox.ymin()}, w={bbox.width()}, h={bbox.height()}\n")
+        log_file.write(string_to_print + "\n")
+
+    print(string_to_print)
+    return
+
+
 def main() -> None:
     # Create an instance of the user app callback class
-    user_data = app_callback_class()
-    app_callback = dummy_callback
+    user_data = user_app_callback_class()
     app = GStreamerTilingApp(app_callback, user_data)
     app.run()
 
