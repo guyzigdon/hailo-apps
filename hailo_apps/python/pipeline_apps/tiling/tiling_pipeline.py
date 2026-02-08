@@ -11,7 +11,7 @@ import os
 # Local application-specific imports
 from hailo_apps.python.core.common.core import get_pipeline_parser, handle_list_models_flag
 from hailo_apps.python.core.common.defines import TILING_APP_TITLE, TILING_PIPELINE
-from hailo_apps.python.core.gstreamer.gstreamer_helper_pipelines import SOURCE_PIPELINE, INFERENCE_PIPELINE, USER_CALLBACK_PIPELINE, DISPLAY_PIPELINE, TILE_CROPPER_PIPELINE
+from hailo_apps.python.core.gstreamer.gstreamer_helper_pipelines import SOURCE_PIPELINE, INFERENCE_PIPELINE, USER_CALLBACK_PIPELINE, DISPLAY_PIPELINE, TILE_CROPPER_PIPELINE, TRACKER_PIPELINE, FILE_SINK_PIPELINE
 from hailo_apps.python.core.gstreamer.gstreamer_app import GStreamerApp, app_callback_class, dummy_callback
 from hailo_apps.python.core.common.hailo_logger import get_logger
 from hailo_apps.python.pipeline_apps.tiling.configuration import TilingConfiguration
@@ -56,9 +56,12 @@ class GStreamerTilingApp(GStreamerApp):
 
         # Copy configuration attributes to self for compatibility
         self._copy_config_attributes()
-        user_data.detection_log_file = f"results/{Path(self.hef_path).stem}_{self.frame_rate}fps_{Path(self.video_source).stem}_t{self.config.tiles_x}x{self.config.tiles_y}_detections.log"
+        
+        # Generate filenames with tracker status
+        tracker_suffix = "tracker_on" if self.enable_tracking else "tracker_off"
+        user_data.detection_log_file = f"results/{Path(self.hef_path).stem}_{self.frame_rate}fps_{Path(self.video_source).stem}_t{self.config.tiles_x}x{self.config.tiles_y}_{tracker_suffix}_detections.log"
         # User-defined label JSON file
-        self.fps_log_file = f"results/{Path(self.hef_path).stem}_tiling_{self.config.tiles_x}x{self.config.tiles_y}_{self.frame_rate}fps_{Path(self.video_source).stem}.log"
+        self.fps_log_file = f"results/{Path(self.hef_path).stem}_tiling_{self.config.tiles_x}x{self.config.tiles_y}_{self.frame_rate}fps_{Path(self.video_source).stem}_{tracker_suffix}.log"
         self.labels_json = self.options_menu.labels_json
         if self.labels_json is None: # if no labels JSON file is provided, try auto-detect it from the HEF file
             self.labels_json = get_hef_labels_json(self.hef_path)
@@ -137,6 +140,16 @@ class GStreamerTilingApp(GStreamerApp):
         
         # Display options
         parser.add_argument("--no-display", action="store_true", help="Disable display window (headless mode)")
+        parser.add_argument("--no-mirror", action="store_true", help="Disable horizontal mirroring for camera input")
+        parser.add_argument("--save-output", type=str, default=None, help="Save output video to file (for camera/live sources)")
+        
+        # Tracking options
+        parser.add_argument("--enable-tracking", action="store_true", help="Enable object tracking")
+        parser.add_argument("--tracking-class-id", type=int, default=-1, help="Class ID to track (-1 for all classes)")
+
+        # Run duration (for live/camera input)
+        parser.add_argument("--timeout", type=int, default=0,
+                          help="Max run time in seconds (0=no limit). Use e.g. 15 for RPi/camera to stop after 15 seconds.")
 
     def _copy_config_attributes(self) -> None:
         """Copy configuration attributes to self for compatibility."""
@@ -173,6 +186,15 @@ class GStreamerTilingApp(GStreamerApp):
         self.border_threshold = self.config.border_threshold
         self.input_codec = getattr(self.options_menu, 'input_codec', 'auto')
         self.no_display = getattr(self.options_menu, 'no_display', False)
+        self.no_mirror = getattr(self.options_menu, 'no_mirror', False)
+        self.save_output = getattr(self.options_menu, 'save_output', None)
+        
+        # Tracking configuration
+        self.enable_tracking = getattr(self.options_menu, 'enable_tracking', False)
+        self.tracking_class_id = getattr(self.options_menu, 'tracking_class_id', -1)
+
+        # Run timeout (for live/camera)
+        self.timeout = getattr(self.options_menu, 'timeout', 0)
 
         # Frame rate adjustment for hailo8l with mobilenet
         if self.model_type == "mobilenet" and self.arch != 'hailo8' and self.batch_size == 15:
@@ -259,6 +281,7 @@ class GStreamerTilingApp(GStreamerApp):
             frame_rate=self.frame_rate,
             sync=self.sync,
             input_codec=self.input_codec,
+            mirror_image=not self.no_mirror,
         )
 
         # Default to 0.001 if not specified (original behavior)
@@ -296,12 +319,25 @@ class GStreamerTilingApp(GStreamerApp):
             border_threshold=self.border_threshold
         )
 
+        # Optionally insert tracker before callback
+        if self.enable_tracking:
+            tracker_pipeline = TRACKER_PIPELINE(
+                class_id=self.tracking_class_id,
+                name='hailo_tracker'
+            )
+        else:
+            tracker_pipeline = ""
+
         user_callback_pipeline = USER_CALLBACK_PIPELINE()
 
-        if self.no_display:
+        if self.save_output:
+            # Use FILE_SINK_PIPELINE to save raw video (for camera sources)
+            output_pipeline = FILE_SINK_PIPELINE(
+                output_file=self.save_output,
+                name="file_sink"
+            )
+        elif self.no_display:
             # Use fakesink for headless execution
-            # sync=true to respect framerate, sync=false for max speed
-            # User might want max speed if analyzing file, but let's stick to 'self.sync' which depends on input type
             output_pipeline = f"fakesink sync={self.sync}"
         else:
             output_pipeline = DISPLAY_PIPELINE(
@@ -310,12 +346,15 @@ class GStreamerTilingApp(GStreamerApp):
                 show_fps=self.show_fps
             )
 
-        pipeline_string = (
-            f'{source_pipeline} ! '
-            f'{tile_cropper_pipeline} ! '
-            f'{user_callback_pipeline} ! '
-            f'{output_pipeline}'
-        )
+        # Build pipeline with optional tracker
+        pipeline_parts = [source_pipeline, tile_cropper_pipeline]
+        
+        if tracker_pipeline:
+            pipeline_parts.append(tracker_pipeline)
+        
+        pipeline_parts.extend([user_callback_pipeline, output_pipeline])
+        
+        pipeline_string = ' ! '.join(pipeline_parts)
         
 
         hailo_logger.debug(f"Pipeline string: {pipeline_string}")

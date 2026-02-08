@@ -1,3 +1,15 @@
+def ANNOTATED_FILE_SINK_PIPELINE(output_file="output.mkv", name="file_sink", bitrate=5000, show_fps=True):
+    """Creates a GStreamer pipeline string for saving the annotated (overlay) video to a file in .mkv format. No FPS overlay for file output."""
+    annotated_file_sink_pipeline = (
+        f"{OVERLAY_PIPELINE(name=f'{name}_overlay')} ! "
+        f"{QUEUE(name=f'{name}_videoconvert_q')} ! "
+        f"videoconvert name={name}_videoconvert n-threads=2 qos=false ! "
+        f"{QUEUE(name=f'{name}_encoder_q')} ! "
+        f"x264enc tune=zerolatency bitrate={bitrate} ! "
+        f"matroskamux ! "
+        f"filesink location={output_file} "
+    )
+    return annotated_file_sink_pipeline
 import os
 
 import yaml

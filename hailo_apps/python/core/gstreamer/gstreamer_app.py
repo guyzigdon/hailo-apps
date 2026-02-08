@@ -244,6 +244,8 @@ def _internal_callback_wrapper(element, buffer, user_data, user_callback, disabl
 # GStreamerApp class
 # -----------------------------------------------------------------------------------------------
 class GStreamerApp:
+    fps_log_file = ""
+
     def __init__(self, args, user_data: app_callback_class):
         hailo_logger.debug("Initializing GStreamerApp")
         setproctitle.setproctitle("Hailo Python App")
@@ -382,6 +384,9 @@ class GStreamerApp:
         return Gst.FlowReturn.OK
 
     def on_fps_measurement(self, sink, fps, droprate, avgfps):
+        if (self.fps_log_file):
+            with open(self.fps_log_file, 'a') as f:
+                f.write(f"{fps},{droprate},{avgfps}\n")
         hailo_logger.info(f"FPS measurement: {fps:.2f}, drop={droprate:.2f}, avg={avgfps:.2f}")
         return True
 
@@ -487,14 +492,8 @@ class GStreamerApp:
         return True
 
     def on_eos(self):
-        hailo_logger.debug("on_eos() called")
-        if self.source_type == "file":
-            hailo_logger.info("File source detected; rebuilding pipeline")
-            # Use GLib.idle_add to defer pipeline rebuild and avoid blocking
-            GLib.idle_add(self._rebuild_pipeline)
-        else:
-            hailo_logger.debug("Non-file source detected; shutting down")
-            self.shutdown()
+        hailo_logger.debug("on_eos() called - shutting down after one run")
+        self.shutdown()
 
     def _connect_callback(self):
         """
@@ -704,6 +703,18 @@ class GStreamerApp:
         if self.options_menu.dump_dot:
             GLib.timeout_add_seconds(3, self.dump_dot_file)
 
+        # Optional run timeout (e.g. for live/camera input like RPi)
+        run_timeout = getattr(self.options_menu, 'timeout', 0)
+        if run_timeout > 0:
+            hailo_logger.info("Run timeout set to %d seconds", run_timeout)
+
+            def _on_timeout():
+                hailo_logger.info("Run timeout reached, shutting down")
+                GLib.idle_add(self.shutdown)
+                return False  # one-shot
+
+            GLib.timeout_add_seconds(run_timeout, _on_timeout)
+
         self.loop.run()
         # Gtk.main()
 
@@ -736,7 +747,11 @@ def picamera_thread(pipeline, video_width, video_height, video_format, picamera_
 
     with Picamera2() as picam2:
         if picamera_config is None:
-            main = {"size": (1280, 720), "format": "RGB888"}
+            # Ensure main >= lores (Picamera2 requirement)
+            # Use camera's max resolution for main to support any lores size
+            main_width = max(2592, video_width)
+            main_height = max(1944, video_height)
+            main = {"size": (main_width, main_height), "format": "RGB888"}
             lores = {"size": (video_width, video_height), "format": "RGB888"}
             controls = {"FrameRate": 30}
             config = picam2.create_preview_configuration(main=main, lores=lores, controls=controls)

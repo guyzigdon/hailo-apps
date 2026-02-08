@@ -275,7 +275,7 @@ def get_native_fps(hef_path, batch_size):
 
 def run_experiments(models, tiles, input_paths, extra_args=None,
                     remote=False, remote_user=None, remote_host=None, remote_path=None,
-                    detection_args=None, recording_mode='none'):
+                    detection_args=None, recording_mode='none', tracking_args=None, timeout=0):
 
     total = len(models) * len(tiles) * len(input_paths) * 1
     count = 0
@@ -311,9 +311,17 @@ def run_experiments(models, tiles, input_paths, extra_args=None,
             for input_path in input_paths:
                 count += 1
                 model_name = model_path.stem
-                output_filename = f"{model_name}_{fps}fps_{Path(input_path).stem}_t{tx}x{ty}.mkv"
+                video_stem = Path(input_path).stem
+                
+                # Tracker suffix (matches tiling_pipeline.py)
+                tracker_enabled = tracking_args.get('enable_tracking', False) if tracking_args else False
+                tracker_suffix = "tracker_on" if tracker_enabled else "tracker_off"
+                
+                output_filename = f"{model_name}_{fps}fps_{video_stem}_t{tx}x{ty}.mkv"
                 output_file = str(results_dir / output_filename)
-                log_file = f"{output_file}.log"
+                
+                # Match tiling_pipeline.py filename format
+                log_file = f"results/{model_name}_tiling_{tx}x{ty}_{fps}fps_{video_stem}_{tracker_suffix}.log"
 
                 cmd = [
                     "python", "tiling_pipeline.py",
@@ -331,12 +339,29 @@ def run_experiments(models, tiles, input_paths, extra_args=None,
                         cmd.extend(["--nms-score-threshold", str(detection_args['nms_score_threshold'])])
                     if 'min_overlap' in detection_args:
                         cmd.extend(["--min-overlap", str(detection_args['min_overlap'])])
+                
+                if tracking_args:
+                    if tracking_args.get('enable_tracking'):
+                        cmd.append("--enable-tracking")
+                    if 'tracking_class_id' in tracking_args and tracking_args['tracking_class_id'] != -1:
+                        cmd.extend(["--tracking-class-id", str(tracking_args['tracking_class_id'])])
+                    if tracking_args.get('no_mirror'):
+                        cmd.append("--no-mirror")
 
                 if extra_args:
                     cmd.extend(extra_args)
+                if timeout > 0:
+                    cmd.extend(["--timeout", str(timeout)])
 
+                # Handle headless mode
+                raw_video_path = None
                 if recording_mode == "headless":
                     cmd.append("--no-display")
+                    
+                    # For camera/live sources, save raw video to file
+                    if input_path.startswith("rpi") or input_path.startswith("/dev/video"):
+                        raw_video_path = str(output_file).replace(".mkv", "_raw.mkv")
+                        cmd.extend(["--save-output", raw_video_path])
 
                 print(f"\n=== Experiment {count}/{total} ===")
                 print(" ".join(cmd))
@@ -360,11 +385,13 @@ def run_experiments(models, tiles, input_paths, extra_args=None,
                     
                     # Post-process video generation for headless mode
                     if recording_mode == "headless":
-                        annotated_video_path = str(output_file).replace(".mkv", "_annotated.mp4")
-                        # Detection log path
-                        det_log = str(output_file).replace(".mkv", "_detections.log")
+                        annotated_video_path = f"results/{model_name}_{fps}fps_{video_stem}_t{tx}x{ty}_{tracker_suffix}_annotated.mp4"
+                        # Detection log path (matches tiling_pipeline.py format)
+                        det_log = f"results/{model_name}_{fps}fps_{video_stem}_t{tx}x{ty}_{tracker_suffix}_detections.log"
                         if os.path.exists(det_log):
-                            generate_annotated_video(input_path, det_log, annotated_video_path)
+                            # For camera sources, use saved raw video; for files, use original
+                            video_for_annotation = raw_video_path if raw_video_path else input_path
+                            generate_annotated_video(video_for_annotation, det_log, annotated_video_path)
                         else:
                             print(f"Warning: Detection log not found at {det_log}, skipping annotation video.")
                 else:
@@ -405,6 +432,15 @@ def parse_args():
     p.add_argument('--nms-score-threshold', type=float, default=None, help="NMS Score threshold")
     p.add_argument('--min-overlap', type=float, default=0.1, help="Minimum overlap ratio")
     
+    # Tracking params passed to tiling_pipeline
+    p.add_argument('--enable-tracking', action='store_true', help="Enable object tracking")
+    p.add_argument('--tracking-class-id', type=int, default=-1, help="Class ID to track (-1 for all classes)")
+    
+    # Camera options
+    p.add_argument('--no-mirror', action='store_true', help="Disable horizontal mirroring for camera input")
+    p.add_argument('--timeout', type=int, default=0,
+                  help="Max run time in seconds for tiling pipeline (0=no limit). Use e.g. 15 for RPi/camera input.")
+    
     return p.parse_args()
 
 def main():
@@ -415,6 +451,12 @@ def main():
         'iou_threshold': args.iou_threshold,
         'nms_score_threshold': args.nms_score_threshold,
         'min_overlap': args.min_overlap
+    }
+    
+    tracking_args = {
+        'enable_tracking': args.enable_tracking,
+        'tracking_class_id': args.tracking_class_id,
+        'no_mirror': args.no_mirror
     }
 
     # Map legacy record_screen to recording_mode if necessary
@@ -432,7 +474,9 @@ def main():
         args.remote_host,
         args.remote_path,
         detection_args,
-        recording_mode
+        recording_mode,
+        tracking_args,
+        timeout=getattr(args, 'timeout', 0),
     )
 
 if __name__ == "__main__":
