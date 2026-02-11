@@ -258,4 +258,5 @@ class TilingConfiguration:
     def _configure_detection(self) -> None:
         """Configure detection parameters."""
         self.iou_threshold = self.options_menu.iou_threshold
+        self.nms_score_threshold = getattr(self.options_menu, 'nms_score_threshold', None)
         self.border_threshold = self.options_menu.border_threshold if self.use_multi_scale else 0.0
