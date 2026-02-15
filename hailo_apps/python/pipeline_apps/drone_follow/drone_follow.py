@@ -28,10 +28,16 @@ import signal
 import threading 
 import time
 
-from drone_control import (
-    ControllerConfig, Detection, SharedDetectionState, run_drone, run_live_drone
-)
-from follow_server import FollowServer, FollowTargetState
+try:
+    from drone_control import (
+        ControllerConfig, Detection, SharedDetectionState, run_drone, run_live_drone
+    )
+    from follow_server import FollowServer, FollowTargetState
+except ImportError:
+    from .drone_control import (
+        ControllerConfig, Detection, SharedDetectionState, run_drone, run_live_drone
+    )
+    from .follow_server import FollowServer, FollowTargetState
 
 # ---------------------------------------------------------------------------
 # Hailo App Callback
@@ -484,7 +490,10 @@ def main():
         ui_state = None
         web_server = None
         if ui_pre_args.ui:
-            from web_server import WebServer, SharedUIState
+            try:
+                from web_server import WebServer, SharedUIState
+            except ImportError:
+                from .web_server import WebServer, SharedUIState
             ui_state = SharedUIState()
             # Auto-enable tracking for UI (stable IDs needed for click-to-follow)
             if not ui_pre_args.enable_tracking:
