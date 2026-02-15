@@ -29,7 +29,7 @@ import threading
 import time
 
 from drone_control import (
-    Detection, SharedDetectionState, run_drone, run_live_drone
+    ControllerConfig, Detection, SharedDetectionState, run_drone, run_live_drone
 )
 from follow_server import FollowServer, FollowTargetState
 
@@ -202,6 +202,16 @@ def _add_drone_follow_args(parser):
                        help="Web UI server port (default: 5001)")
     group.add_argument("--ui-fps", type=int, default=10,
                        help="MJPEG stream frame rate (default: 10)")
+
+    # Safety limits
+    group.add_argument("--max-forward", type=float, default=1.0,
+                       help="Max forward speed in m/s (default: 1.0)")
+    group.add_argument("--max-backward", type=float, default=2.0,
+                       help="Max backward speed in m/s (default: 2.0)")
+    group.add_argument("--max-bbox-height-safety", type=float, default=0.8,
+                       help="Safety limit: stop/retreat if bbox height > limit (0.0-1.0) (default: 0.8)")
+    group.add_argument("--search-timeout", type=float, default=60.0,
+                       help="Seconds before landing if no person is found (default: 60.0)")
 
 
 def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None, ui_fps=10):
@@ -486,6 +496,9 @@ def main():
                          ui_state=ui_state, ui_fps=ui_pre_args.ui_fps)
         args = app.options_menu
 
+        # Create controller config once so it can be shared (and mutated via web UI)
+        controller_config = ControllerConfig.from_args(args)
+
         # Start follow server (always available)
         follow_server = FollowServer(target_state, shared_state, port=args.follow_server_port)
         follow_server.start()
@@ -494,6 +507,7 @@ def main():
         if ui_state is not None:
             static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ui", "build")
             web_server = WebServer(ui_state, target_state, shared_state,
+                                   controller_config=controller_config,
                                    port=args.ui_port, static_dir=static_dir)
             web_server.start()
 
@@ -531,7 +545,8 @@ def main():
                     signal.signal(signal.SIGTERM, on_signal)
             loop.run_until_complete(
                 run_live_drone(args, shared_state, shutdown,
-                              takeoff_done=takeoff_done, pipeline_quit_cb=app.loop.quit))
+                              takeoff_done=takeoff_done, pipeline_quit_cb=app.loop.quit,
+                              config=controller_config))
         except KeyboardInterrupt:
             if not shutdown.is_set():
                 shutdown.set()

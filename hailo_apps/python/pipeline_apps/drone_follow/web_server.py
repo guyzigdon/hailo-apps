@@ -71,6 +71,7 @@ class _WebHandler(BaseHTTPRequestHandler):
     ui_state: SharedUIState = None
     target_state = None  # FollowTargetState
     shared_state = None  # SharedDetectionState
+    controller_config = None  # ControllerConfig
     static_dir: str = None
 
     def log_message(self, format, *args):
@@ -97,6 +98,8 @@ class _WebHandler(BaseHTTPRequestHandler):
             self._handle_detections()
         elif self.path == "/api/status":
             self._handle_status()
+        elif self.path == "/api/config":
+            self._handle_get_config()
         else:
             self._handle_static()
 
@@ -143,6 +146,58 @@ class _WebHandler(BaseHTTPRequestHandler):
         if self.shared_state is not None:
             status["available_ids"] = list(self.shared_state.get_available_ids())
         body = json.dumps(status).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self._cors_headers()
+        self.end_headers()
+        self.wfile.write(body)
+
+    # Exposed controller config fields and their types
+    _CONFIG_FIELDS = {
+        "kp_yaw": float,
+        "kp_forward": float,
+        "max_forward": float,
+        "max_backward": float,
+        "yaw_only": bool,
+    }
+
+    def _handle_get_config(self):
+        cfg = self.controller_config
+        if cfg is None:
+            self.send_error(404, "No controller config available")
+            return
+        data = {k: getattr(cfg, k) for k in self._CONFIG_FIELDS}
+        body = json.dumps(data).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self._cors_headers()
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _handle_post_config(self):
+        cfg = self.controller_config
+        if cfg is None:
+            self.send_error(404, "No controller config available")
+            return
+        length = int(self.headers.get("Content-Length", 0))
+        raw = self.rfile.read(length) if length else b"{}"
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            self.send_error(400, "Invalid JSON")
+            return
+        for key, value in payload.items():
+            if key not in self._CONFIG_FIELDS:
+                continue
+            expected = self._CONFIG_FIELDS[key]
+            try:
+                setattr(cfg, key, expected(value))
+            except (TypeError, ValueError):
+                continue
+        data = {k: getattr(cfg, k) for k in self._CONFIG_FIELDS}
+        body = json.dumps(data).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
@@ -204,7 +259,9 @@ class _WebHandler(BaseHTTPRequestHandler):
     # ------------------------------------------------------------------
 
     def do_POST(self):
-        if self.path == "/api/follow/clear":
+        if self.path == "/api/config":
+            self._handle_post_config()
+        elif self.path == "/api/follow/clear":
             self._handle_follow_clear()
         elif self.path.startswith("/api/follow/"):
             self._handle_follow()
@@ -269,10 +326,11 @@ class WebServer:
     """Web server for drone-follow UI. Runs in a daemon thread."""
 
     def __init__(self, ui_state, target_state=None, shared_state=None,
-                 host="0.0.0.0", port=5001, static_dir=None):
+                 controller_config=None, host="0.0.0.0", port=5001, static_dir=None):
         self.ui_state = ui_state
         self.target_state = target_state
         self.shared_state = shared_state
+        self.controller_config = controller_config
         self.host = host
         self.port = port
         self.static_dir = static_dir
@@ -283,6 +341,7 @@ class WebServer:
         _WebHandler.ui_state = self.ui_state
         _WebHandler.target_state = self.target_state
         _WebHandler.shared_state = self.shared_state
+        _WebHandler.controller_config = self.controller_config
         _WebHandler.static_dir = self.static_dir
 
         self.server = ThreadingHTTPServer((self.host, self.port), _WebHandler)

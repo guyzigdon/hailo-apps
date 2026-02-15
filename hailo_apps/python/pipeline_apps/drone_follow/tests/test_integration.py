@@ -9,7 +9,7 @@ import time
 
 import pytest
 
-from hailo_apps.python.pipeline_apps.drone_follow.drone_follow import (
+from drone_control import (
     Detection,
     SharedDetectionState,
     ControllerConfig,

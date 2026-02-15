@@ -1,12 +1,16 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 
 const POLL_INTERVAL = 100; // ms
+const DEBOUNCE_MS = 250;
 
 export default function App() {
   const [detections, setDetections] = useState([]);
   const [followingId, setFollowingId] = useState(null);
   const [videoDims, setVideoDims] = useState({ width: 0, height: 0 });
+  const [controlsOpen, setControlsOpen] = useState(false);
+  const [config, setConfig] = useState(null);
   const imgRef = useRef(null);
+  const debounceRef = useRef(null);
 
   // Poll detections
   useEffect(() => {
@@ -30,6 +34,16 @@ export default function App() {
     return () => {
       active = false;
     };
+  }, []);
+
+  // Fetch config on mount
+  useEffect(() => {
+    fetch("/api/config")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (data) setConfig(data);
+      })
+      .catch(() => {});
   }, []);
 
   // Track image natural dimensions
@@ -56,6 +70,35 @@ export default function App() {
     }
   };
 
+  // Debounced POST for config changes
+  const postConfig = useCallback((updated) => {
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    debounceRef.current = setTimeout(() => {
+      fetch("/api/config", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(updated),
+      })
+        .then((r) => (r.ok ? r.json() : null))
+        .then((data) => {
+          if (data) setConfig(data);
+        })
+        .catch(() => {});
+    }, DEBOUNCE_MS);
+  }, []);
+
+  const onSlider = (key, value) => {
+    const updated = { ...config, [key]: parseFloat(value) };
+    setConfig(updated);
+    postConfig({ [key]: parseFloat(value) });
+  };
+
+  const onToggle = (key) => {
+    const updated = { ...config, [key]: !config[key] };
+    setConfig(updated);
+    postConfig({ [key]: !config[key] });
+  };
+
   const vw = videoDims.width;
   const vh = videoDims.height;
 
@@ -71,6 +114,86 @@ export default function App() {
           Clear Target
         </button>
       </div>
+
+      {config && (
+        <div className="controls-panel">
+          <button
+            className="controls-toggle"
+            onClick={() => setControlsOpen((o) => !o)}
+          >
+            Controls {controlsOpen ? "\u25B2" : "\u25BC"}
+          </button>
+          {controlsOpen && (
+            <div className="controls-body">
+              <label className="control-row">
+                <span className="control-label">Yaw Gain</span>
+                <input
+                  type="range"
+                  min="0"
+                  max="10"
+                  step="0.1"
+                  value={config.kp_yaw}
+                  onChange={(e) => onSlider("kp_yaw", e.target.value)}
+                />
+                <span className="control-value">{config.kp_yaw.toFixed(1)}</span>
+              </label>
+              <label className="control-row">
+                <span className="control-label">Forward Gain</span>
+                <input
+                  type="range"
+                  min="0"
+                  max="10"
+                  step="0.1"
+                  value={config.kp_forward}
+                  onChange={(e) => onSlider("kp_forward", e.target.value)}
+                />
+                <span className="control-value">
+                  {config.kp_forward.toFixed(1)}
+                </span>
+              </label>
+              <label className="control-row">
+                <span className="control-label">Max Forward</span>
+                <input
+                  type="range"
+                  min="0"
+                  max="5"
+                  step="0.1"
+                  value={config.max_forward}
+                  onChange={(e) => onSlider("max_forward", e.target.value)}
+                />
+                <span className="control-value">
+                  {config.max_forward.toFixed(1)} m/s
+                </span>
+              </label>
+              <label className="control-row">
+                <span className="control-label">Max Backward</span>
+                <input
+                  type="range"
+                  min="0"
+                  max="5"
+                  step="0.1"
+                  value={config.max_backward}
+                  onChange={(e) => onSlider("max_backward", e.target.value)}
+                />
+                <span className="control-value">
+                  {config.max_backward.toFixed(1)} m/s
+                </span>
+              </label>
+              <label className="control-row">
+                <span className="control-label">Yaw Only</span>
+                <div className="toggle-wrapper">
+                  <button
+                    className={`toggle-btn ${config.yaw_only ? "toggle-on" : ""}`}
+                    onClick={() => onToggle("yaw_only")}
+                  >
+                    {config.yaw_only ? "ON" : "OFF"}
+                  </button>
+                </div>
+              </label>
+            </div>
+          )}
+        </div>
+      )}
 
       <div className="video-container">
         <img

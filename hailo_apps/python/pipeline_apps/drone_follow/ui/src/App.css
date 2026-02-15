@@ -72,3 +72,92 @@ body {
   width: 100%;
   height: 100%;
 }
+
+/* Controls panel */
+.controls-panel {
+  width: 100%;
+  max-width: 1280px;
+  margin-bottom: 8px;
+  background: #2a2a2a;
+  border: 1px solid #3a3a3a;
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.controls-toggle {
+  width: 100%;
+  padding: 8px 16px;
+  background: transparent;
+  color: #e0e0e0;
+  border: none;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  text-align: left;
+}
+
+.controls-toggle:hover {
+  background: #333;
+}
+
+.controls-body {
+  padding: 8px 16px 12px;
+  border-top: 1px solid #3a3a3a;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.control-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.control-label {
+  width: 120px;
+  flex-shrink: 0;
+  font-size: 13px;
+}
+
+.control-row input[type="range"] {
+  flex: 1;
+  accent-color: #5a9;
+}
+
+.control-value {
+  width: 70px;
+  flex-shrink: 0;
+  text-align: right;
+  font-size: 13px;
+  font-family: monospace;
+}
+
+.toggle-wrapper {
+  flex: 1;
+}
+
+.toggle-btn {
+  padding: 4px 18px;
+  background: #444;
+  color: #e0e0e0;
+  border: 1px solid #555;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  min-width: 60px;
+}
+
+.toggle-btn:hover {
+  background: #555;
+}
+
+.toggle-btn.toggle-on {
+  background: #2a7a4a;
+  border-color: #3a9a5a;
+}
+
+.toggle-btn.toggle-on:hover {
+  background: #348a54;
+}

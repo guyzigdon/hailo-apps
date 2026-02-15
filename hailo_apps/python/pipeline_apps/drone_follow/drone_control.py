@@ -65,11 +65,14 @@ class ControllerConfig:
     kp_forward: float = 3.0
     dead_zone_height: float = 0.05
     max_forward: float = 2.0
-    max_backward: float = 1.0
+    max_backward: float = 2.0
     search_yawspeed: float = 20.0
     detection_timeout_s: float = 0.5
+    search_timeout_s: float = 60.0
     control_loop_hz: float = 10.0
     fixed_altitude: bool = True
+    max_bbox_height_safety: float = 0.8  # Safety limit: if bbox height > 0.8, we are too close
+    yaw_only: bool = False
 
     @classmethod
     def from_args(cls, args):
@@ -83,6 +86,10 @@ class ControllerConfig:
             fixed_altitude=args.fixed_altitude,
             detection_timeout_s=getattr(args, 'detection_timeout', 0.5),
             control_loop_hz=getattr(args, 'control_loop_hz', 10.0),
+            max_forward=getattr(args, 'max_forward', 1.0),
+            max_backward=getattr(args, 'max_backward', 2.0),
+            max_bbox_height_safety=getattr(args, 'max_bbox_height_safety', 0.8),
+            search_timeout_s=getattr(args, 'search_timeout', 60.0),
         )
 
 def compute_velocity_command(detection: Optional[Detection], config: ControllerConfig) -> VelocityBodyYawspeed:
@@ -102,10 +109,21 @@ def compute_velocity_command(detection: Optional[Detection], config: ControllerC
         down = 0.0 if abs(error_y_deg) < config.dead_zone_deg else config.kp_down * error_y_deg
         down = max(-config.max_down_speed, min(config.max_down_speed, down))
 
-    # Forward (Distance)
-    height_error = config.target_bbox_height - detection.bbox_height
-    forward = 0.0 if abs(height_error) < config.dead_zone_height else config.kp_forward * height_error
-    forward = max(-config.max_backward, min(config.max_forward, forward))
+    # Forward (Distance) with safety check
+    if config.yaw_only:
+        forward = 0.0
+    elif detection.bbox_height > config.max_bbox_height_safety:
+        # Safety Check: If bbox is too big, we are dangerously close
+        forward = -config.max_backward
+    else:
+        height_error = config.target_bbox_height - detection.bbox_height
+        forward = 0.0 if abs(height_error) < config.dead_zone_height else config.kp_forward * height_error
+
+        # Asymmetric limits: faster backward (negative), slower forward (positive)
+        if forward > 0:
+            forward = min(config.max_forward, forward)
+        else:
+            forward = max(-config.max_backward, forward)
 
     return VelocityBodyYawspeed(forward, 0.0, down, yawspeed)
 
@@ -204,6 +222,8 @@ async def mock_control_loop(drone, shared_state, config, pattern, initial_x, ini
 
     # Internal state: where the "person" is relative to camera
     cx, cy, bh = initial_x, initial_y, config.target_bbox_height * 0.1
+    
+    last_detection_time = time.monotonic()
 
     try:
         while True:
@@ -211,9 +231,18 @@ async def mock_control_loop(drone, shared_state, config, pattern, initial_x, ini
 
             # 1. Update shared state
             shared_state.update(Detection("person", 0.99, cx, cy, bh, time.monotonic()))
+            # Since we always simulate a detection here in mock mode, we update last_detection_time
+            last_detection_time = time.monotonic()
 
             # 2. Get commands
             detection, _ = shared_state.get_latest()
+            
+            # (In mock mode we don't really lose detection unless we simulate it, 
+            # so the timeout check is less critical here but good for consistency)
+            if time.monotonic() - last_detection_time > config.search_timeout_s:
+                print(f"\n[SIM] Search timeout ({config.search_timeout_s}s) exceeded. Landing...")
+                break
+
             cmd = compute_velocity_command(detection, config)
             await drone.offboard.set_velocity_body(cmd)
 
@@ -383,13 +412,26 @@ async def live_control_loop(drone, shared_state, config, shutdown):
     If drone is None (hailo-dry-run), prints commands instead.
     """
     period = 1.0 / config.control_loop_hz
+    last_detection_time = time.monotonic()
+    
     try:
         while not shutdown.is_set():
             detection, _ = shared_state.get_latest()
+            
             if detection is not None:
                 age = time.monotonic() - detection.timestamp
                 if age > config.detection_timeout_s:
                     detection = None
+                else:
+                    last_detection_time = time.monotonic()
+            
+            # Check search timeout
+            if time.monotonic() - last_detection_time > config.search_timeout_s:
+                print(f"\n\n[drone] Search timeout ({config.search_timeout_s}s) exceeded - no person found.")
+                print("[drone] Initiating safety landing...")
+                shutdown.set()
+                break
+
             cmd = compute_velocity_command(detection, config)
             if drone is not None:
                 await drone.offboard.set_velocity_body(cmd)
@@ -409,14 +451,16 @@ async def live_control_loop(drone, shared_state, config, shutdown):
         raise
 
 
-async def run_live_drone(args, shared_state, shutdown, shutdown_read_fd=None, takeoff_done=None, pipeline_quit_cb=None):
+async def run_live_drone(args, shared_state, shutdown, shutdown_read_fd=None, takeoff_done=None, pipeline_quit_cb=None, config=None):
     """Connect to drone and run live control loop with Hailo detections.
 
     If takeoff_done is a threading.Event, it is set after takeoff and offboard start,
     so the Hailo pipeline can wait before starting.
     If pipeline_quit_cb is set, it is called at shutdown start so the pipeline stops first.
+    If config is provided, use it directly (allows live mutation from web UI).
     """
-    config = ControllerConfig.from_args(args)
+    if config is None:
+        config = ControllerConfig.from_args(args)
     
     if shutdown_read_fd is not None:
         loop = asyncio.get_running_loop()
