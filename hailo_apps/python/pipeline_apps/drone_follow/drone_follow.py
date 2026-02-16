@@ -25,8 +25,10 @@ import argparse
 import asyncio
 import os
 import signal
-import threading 
+import threading
 import time
+
+import numpy as np
 
 try:
     from drone_control import (
@@ -40,92 +42,172 @@ except ImportError:
     from .follow_server import FollowServer, FollowTargetState
 
 # ---------------------------------------------------------------------------
+# ByteTracker import
+# ---------------------------------------------------------------------------
+
+try:
+    from byte_tracker import ByteTracker
+except ImportError:
+    from .byte_tracker import ByteTracker
+
+
+# ---------------------------------------------------------------------------
 # Hailo App Callback
 # ---------------------------------------------------------------------------
 
+def _maybe_clear_target_after_lost(user_data):
+    """Clear the follow target only if it has been missing longer than tracking_lost_timeout_s."""
+    target_state = getattr(user_data, 'target_state', None)
+    if target_state is None:
+        return
+    target_id = target_state.get_target()
+    if target_id is None:
+        return
+    last_seen = target_state.get_last_seen()
+    if last_seen is None:
+        target_state.set_target(None)
+        return
+    timeout_s = getattr(user_data, 'tracking_lost_timeout_s', 2.0)
+    if time.monotonic() - last_seen >= timeout_s:
+        target_state.set_target(None)
+
+
+def _extract_frame(element, buffer):
+    """Extract a numpy RGB frame from the GStreamer buffer (returns None on failure)."""
+    try:
+        from hailo_apps.python.core.common.buffer_utils import (
+            get_caps_from_pad, get_numpy_from_buffer,
+        )
+        pad = element.get_static_pad("src")
+        fmt, width, height = get_caps_from_pad(pad)
+        if fmt is not None and width is not None and height is not None:
+            frame = get_numpy_from_buffer(buffer, fmt, width, height)
+            if isinstance(frame, np.ndarray):
+                return frame
+    except Exception:
+        pass
+    return None
+
+
+def _build_det_info(person, track_id=None):
+    """Build a UI detection dict from a Hailo detection object."""
+    pbbox = person.get_bbox()
+    det_info = {
+        "label": "person",
+        "confidence": round(person.get_confidence(), 3),
+        "bbox": {
+            "x": round(pbbox.xmin(), 4),
+            "y": round(pbbox.ymin(), 4),
+            "w": round(pbbox.width(), 4),
+            "h": round(pbbox.height(), 4),
+        },
+    }
+    if track_id is not None:
+        det_info["id"] = track_id
+    return det_info
+
+
 def app_callback(element, buffer, user_data):
-    """Tiling pipeline callback: pick largest person (or specific tracked person), update shared state."""
+    """Tiling pipeline callback: pick largest person (or specific tracked person), update shared state.
+
+    When ByteTracker is enabled (user_data.byte_tracker is not None):
+    1. Convert detections to Nx5 array, run tracker.update() synchronously
+    2. Each returned track has input_index pointing to the matched detection
+    3. Build person_by_id directly — no cross-frame IoU re-matching needed
+    """
     import hailo
     roi = hailo.get_roi_from_buffer(buffer)
     detections = roi.get_objects_typed(hailo.HAILO_DETECTION)
     persons = [d for d in detections if d.get_label() == "person"]
-    frame = user_data.get_count()
-    
+
+    byte_tracker = getattr(user_data, 'byte_tracker', None)
+
     if not persons:
+        # Still call tracker so it can age out lost tracks
+        if byte_tracker is not None:
+            byte_tracker.update(np.empty((0, 5)))
         user_data.shared_state.update(None, available_ids=set())
-        # Clear follow state when no person in frame
         if hasattr(user_data, 'target_state') and user_data.target_state is not None:
-            user_data.target_state.set_target(None)
-        # Update UI state (empty detections)
+            _maybe_clear_target_after_lost(user_data)
         ui_state = getattr(user_data, 'ui_state', None)
         if ui_state is not None:
             following_id = user_data.target_state.get_target() if getattr(user_data, 'target_state', None) else None
             ui_state.update_detections([], following_id)
-        print(f"\r[SEARCH MODE] No person detected in frame - follow state cleared", end="", flush=True)
+        if user_data.target_state.get_target() is None:
+            print(f"\r[SEARCH MODE] No person detected in frame - follow state cleared", end="", flush=True)
         return
-    
-    # Build map of available IDs (if tracking is enabled)
+
+    # --- Build detection arrays and run tracker ---
     available_ids = set()
     person_by_id = {}
-    for person in persons:
-        track = person.get_objects_typed(hailo.HAILO_UNIQUE_ID)
-        if len(track) == 1:
-            track_id = track[0].get_id()
-            available_ids.add(track_id)
-            person_by_id[track_id] = person
-    
-    # If tracking is enabled and a target is set, follow that specific person
+
+    if byte_tracker is not None:
+        # Convert person detections to Nx5 array [x1, y1, x2, y2, score] in pixel coords
+        # Hailo bboxes are normalized 0-1; ByteTracker needs pixel coords.
+        # Use a fixed reference frame (1000x1000) since we only need consistent scale.
+        SCALE = 1000.0
+        det_array = np.empty((len(persons), 5), dtype=np.float32)
+        for i, person in enumerate(persons):
+            bbox = person.get_bbox()
+            det_array[i, 0] = bbox.xmin() * SCALE
+            det_array[i, 1] = bbox.ymin() * SCALE
+            det_array[i, 2] = (bbox.xmin() + bbox.width()) * SCALE
+            det_array[i, 3] = (bbox.ymin() + bbox.height()) * SCALE
+            det_array[i, 4] = person.get_confidence()
+
+        # Run tracker synchronously — tracker records input_index on each track
+        all_tracks = byte_tracker.update(det_array)
+
+        for t in all_tracks:
+            if t.is_activated and t.input_index >= 0 and t.input_index < len(persons):
+                available_ids.add(t.track_id)
+                person_by_id[t.track_id] = persons[t.input_index]
+            elif t.is_activated:
+                # Track exists but wasn't matched to a detection this frame (lost track)
+                available_ids.add(t.track_id)
+    else:
+        # No tracker — check for HailoTracker IDs on detections (legacy/fallback)
+        for person in persons:
+            track = person.get_objects_typed(hailo.HAILO_UNIQUE_ID)
+            if len(track) == 1:
+                track_id = track[0].get_id()
+                available_ids.add(track_id)
+                person_by_id[track_id] = person
+
+    # --- Target selection ---
     target_id = None
     if hasattr(user_data, 'target_state') and user_data.target_state is not None:
         target_id = user_data.target_state.get_target()
-    
+
     best = None
     follow_mode = ""
     if target_id is not None:
-        # Look for the person with the matching track ID
         best = person_by_id.get(target_id)
-        
+
         if best is not None:
             user_data.target_state.update_last_seen()
             follow_mode = f"ID {target_id}"
         else:
-            # Target not found, clear detection and clear follow state
+            # Target not in frame: clear detection; only drop track ID after grace period
             user_data.shared_state.update(None, available_ids=available_ids)
-            user_data.target_state.set_target(None)
-            # Still update UI with all visible persons even though target is lost
+            _maybe_clear_target_after_lost(user_data)
             ui_state = getattr(user_data, 'ui_state', None)
             if ui_state is not None:
-                all_dets = []
-                for person in persons:
-                    pbbox = person.get_bbox()
-                    det_info = {
-                        "label": "person",
-                        "confidence": round(person.get_confidence(), 3),
-                        "bbox": {
-                            "x": round(pbbox.xmin(), 4),
-                            "y": round(pbbox.ymin(), 4),
-                            "w": round(pbbox.width(), 4),
-                            "h": round(pbbox.height(), 4),
-                        },
-                    }
-                    ptrack = person.get_objects_typed(hailo.HAILO_UNIQUE_ID)
-                    if len(ptrack) == 1:
-                        det_info["id"] = ptrack[0].get_id()
-                    all_dets.append(det_info)
-                ui_state.update_detections(all_dets, None)
-            print(f"\r[SEARCH MODE] Target ID {target_id} not in frame. Available: {sorted(available_ids) if available_ids else 'none'} - follow state cleared", end="", flush=True)
+                all_dets = [_build_det_info(p, _find_track_id(p, person_by_id)) for p in persons]
+                following_id = user_data.target_state.get_target()
+                ui_state.update_detections(all_dets, following_id)
+            if user_data.target_state.get_target() is None:
+                print(f"\r[SEARCH MODE] Target ID {target_id} not in frame. Available: {sorted(available_ids) if available_ids else 'none'} - follow state cleared", end="", flush=True)
             return
     else:
         # No specific target, pick the largest person
         best = max(persons, key=lambda d: d.get_bbox().width() * d.get_bbox().height())
-        
-        # Check if this person has a tracking ID
-        best_track = best.get_objects_typed(hailo.HAILO_UNIQUE_ID)
-        if len(best_track) == 1:
-            follow_mode = f"largest (ID {best_track[0].get_id()})"
+        best_tid = _find_track_id(best, person_by_id)
+        if best_tid is not None:
+            follow_mode = f"largest (ID {best_tid})"
         else:
             follow_mode = "largest (no tracking)"
-    
+
     bbox = best.get_bbox()
     cx = bbox.xmin() + bbox.width() / 2
     cy = bbox.ymin() + bbox.height() / 2
@@ -137,33 +219,25 @@ def app_callback(element, buffer, user_data):
         bbox_height=bbox.height(),
         timestamp=time.monotonic(),
     ), available_ids=available_ids)
-    
+
     # Update UI state with all person detections
     ui_state = getattr(user_data, 'ui_state', None)
     if ui_state is not None:
-        all_dets = []
-        for person in persons:
-            pbbox = person.get_bbox()
-            det_info = {
-                "label": "person",
-                "confidence": round(person.get_confidence(), 3),
-                "bbox": {
-                    "x": round(pbbox.xmin(), 4),
-                    "y": round(pbbox.ymin(), 4),
-                    "w": round(pbbox.width(), 4),
-                    "h": round(pbbox.height(), 4),
-                },
-            }
-            ptrack = person.get_objects_typed(hailo.HAILO_UNIQUE_ID)
-            if len(ptrack) == 1:
-                det_info["id"] = ptrack[0].get_id()
-            all_dets.append(det_info)
+        all_dets = [_build_det_info(p, _find_track_id(p, person_by_id)) for p in persons]
         following_id = user_data.target_state.get_target() if getattr(user_data, 'target_state', None) else None
         ui_state.update_detections(all_dets, following_id)
 
     # Log following status
     available_str = f"Available: {sorted(available_ids)}" if available_ids else ""
     print(f"\r[FOLLOWING {follow_mode}] conf={best.get_confidence():.2f} center=({cx:.2f},{cy:.2f}) h={bbox.height():.2f} {available_str}".ljust(120), end="", flush=True)
+
+
+def _find_track_id(person, person_by_id):
+    """Return the track ID for a person detection, or None."""
+    for tid, p in person_by_id.items():
+        if p is person:
+            return tid
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -182,6 +256,8 @@ def _add_drone_follow_args(parser):
     group.add_argument("--forward-gain", type=float, default=3.0)
     group.add_argument("--pitch-gain", type=float, default=0.08)
     group.add_argument("--connection", default="udpin://0.0.0.0:14540")
+    group.add_argument("--no-takeoff-landing", action="store_true",
+                       help="Do not take off or land; assume drone is already in offboard mode")
     group.add_argument("--takeoff-altitude", type=float, default=3.0)
     group.add_argument("--mission-duration", type=float, default=300.0)
     group.add_argument("--hfov", type=float, default=66.0)
@@ -189,6 +265,8 @@ def _add_drone_follow_args(parser):
     group.add_argument("--fixed-altitude", action="store_true")
     group.add_argument("--detection-timeout", type=float, default=0.5,
                        help="Seconds before a stale detection triggers search mode")
+    group.add_argument("--tracking-lost-timeout", type=float, default=2.0,
+                       help="Seconds to keep following a track ID after target leaves frame (looser tracking)")
     group.add_argument("--control-loop-hz", type=float, default=10.0)
     group.add_argument("--follow-server-port", type=int, default=8080,
                        help="HTTP server port for target selection (only with --enable-tracking)")
@@ -243,11 +321,14 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
     )
 
     class DroneFollowUserData(user_app_callback_class):
-        def __init__(self, shared_state, target_state=None, ui_state=None):
+        def __init__(self, shared_state, target_state=None, ui_state=None,
+                     tracking_lost_timeout_s=2.0, byte_tracker=None):
             super().__init__()
             self.shared_state = shared_state
             self.target_state = target_state
             self.ui_state = ui_state
+            self.tracking_lost_timeout_s = tracking_lost_timeout_s
+            self.byte_tracker = byte_tracker
 
     class DroneFollowTilingApp(GStreamerTilingApp):
         """Tiling app with EOS handling and optional MJPEG appsink for web UI."""
@@ -296,13 +377,20 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
                 self._connect_mjpeg_sink()
 
         def get_pipeline_string(self):
+            # Override parent to never insert hailotracker GStreamer element;
+            # ByteTracker runs in Python instead.
+            saved = self.enable_tracking
+            self.enable_tracking = False
             if not self._ui_enabled:
-                return super().get_pipeline_string()
+                result = super().get_pipeline_string()
+                self.enable_tracking = saved
+                return result
+            self.enable_tracking = saved
 
             # Build pipeline with tee: one branch for display, one for MJPEG appsink
             from hailo_apps.python.core.gstreamer.gstreamer_helper_pipelines import (
                 SOURCE_PIPELINE, INFERENCE_PIPELINE, USER_CALLBACK_PIPELINE,
-                TILE_CROPPER_PIPELINE, TRACKER_PIPELINE,
+                TILE_CROPPER_PIPELINE,
             )
 
             source_pipeline = SOURCE_PIPELINE(
@@ -341,12 +429,8 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
                 border_threshold=self.border_threshold,
             )
 
+            # ByteTracker runs in Python (async thread), not as a GStreamer element
             tracker_pipeline = ""
-            if self.enable_tracking:
-                tracker_pipeline = TRACKER_PIPELINE(
-                    class_id=self.tracking_class_id,
-                    name='hailo_tracker',
-                )
 
             user_callback_pipeline = USER_CALLBACK_PIPELINE()
 
@@ -384,11 +468,27 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
     parser = get_pipeline_parser()
     _add_drone_follow_args(parser)
 
-    user_data = DroneFollowUserData(shared_state, target_state, ui_state=ui_state)
-    return DroneFollowTilingApp(
+    # Pre-parse to check if tracking is enabled (so we can create the tracker before full parse)
+    _track_pre = argparse.ArgumentParser(add_help=False)
+    _track_pre.add_argument("--enable-tracking", action="store_true")
+    _track_pre_args, _ = _track_pre.parse_known_args()
+
+    tracker = None
+    if _track_pre_args.enable_tracking:
+        tracker = ByteTracker(
+            track_thresh=0.4, track_buffer=90, match_thresh=0.5, frame_rate=30,
+        )
+        print("[tracking] ByteTracker running synchronously in callback")
+
+    user_data = DroneFollowUserData(
+        shared_state, target_state, ui_state=ui_state, byte_tracker=tracker,
+    )
+    app = DroneFollowTilingApp(
         app_callback, user_data, parser=parser, eos_reached=eos_reached,
         ui_enabled=(ui_state is not None), ui_state=ui_state, ui_fps=ui_fps,
     )
+    user_data.tracking_lost_timeout_s = getattr(app.options_menu, 'tracking_lost_timeout', 2.0)
+    return app
 
 
 # ---------------------------------------------------------------------------

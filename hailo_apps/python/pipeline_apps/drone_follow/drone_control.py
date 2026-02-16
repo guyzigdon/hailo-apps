@@ -3,6 +3,7 @@ import math
 import os
 import signal
 import subprocess
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -11,6 +12,7 @@ from typing import Optional
 import mavsdk
 from mavsdk import System
 from mavsdk.offboard import OffboardError, VelocityBodyYawspeed
+from mavsdk.telemetry import FlightMode
 
 # ---------------------------------------------------------------------------
 # Data structures
@@ -308,23 +310,34 @@ async def run_drone(
         drone = System()
         await drone.connect(system_address=connection_url)
 
-        print("[drone] Connecting and taking off...")
+        manage_takeoff_landing = not getattr(args, 'no_takeoff_landing', False)
+        if manage_takeoff_landing:
+            print("[drone] Connecting and taking off...")
+        else:
+            print("[drone] Connecting (drone must already be in OFFBOARD)...")
         async for state in drone.core.connection_state():
             if state.is_connected:
                 break
 
-        await drone.action.set_takeoff_altitude(args.takeoff_altitude)
-        await drone.action.arm()
-        await drone.action.takeoff()
-        await asyncio.sleep(8)
+        if manage_takeoff_landing:
+            await drone.action.set_takeoff_altitude(args.takeoff_altitude)
+            await drone.action.arm()
+            await drone.action.takeoff()
+            await asyncio.sleep(8)
+        else:
+            await _require_offboard_mode(drone)
 
         await drone.offboard.set_velocity_body(VelocityBodyYawspeed(0.0, 0.0, 0.0, 0.0))
         await drone.offboard.start()
         offboard_started = True
+        # When not manage_takeoff_landing we do not call offboard.stop() on exit (don't change mode)
 
         task = asyncio.create_task(
             mock_control_loop(drone, shared_state, config, args.mock_pattern, args.mock_x, args.mock_y, args.mock_circle_diameter)
         )
+        watch_task = None
+        if not manage_takeoff_landing:
+            watch_task = asyncio.create_task(_watch_offboard_mode(drone, shutdown))
 
         try:
             # Wait for mission duration or Ctrl+C (shutdown event)
@@ -346,7 +359,12 @@ async def run_drone(
         except asyncio.CancelledError:
             print("\n[drone] Shutdown requested, landing...")
         finally:
-            # 1. Stop control loop (may raise if cancel-handler RPC failed; ignore so we still land)
+            if watch_task is not None:
+                watch_task.cancel()
+                try:
+                    await watch_task
+                except asyncio.CancelledError:
+                    pass
             task.cancel()
             try:
                 await task
@@ -354,11 +372,8 @@ async def run_drone(
                 pass
             except Exception:
                 pass
-            # 2. Leave offboard mode and land safely (ignore second Ctrl+C during landing)
             if offboard_started and drone is not None:
-                print("[drone] Landing safely - please wait (ignoring further Ctrl+C until done)...")
-                try:
-                    _ignore_sigint_during_landing(ignore=True)
+                if manage_takeoff_landing:
                     try:
                         await drone.offboard.set_velocity_body(VelocityBodyYawspeed(0.0, 0.0, 0.0, 0.0))
                         await drone.offboard.stop()
@@ -366,17 +381,49 @@ async def run_drone(
                         print(f"[drone] Offboard stop: {e._result.result}")
                     except Exception as e:
                         _print_connection_error("[drone] Offboard stop", e)
-                    print("[drone] Landing...")
+                if manage_takeoff_landing:
+                    print("[drone] Landing safely - please wait (ignoring further Ctrl+C until done)...")
                     try:
-                        await drone.action.land()
-                        await asyncio.sleep(8)
-                    except Exception as e:
-                        _print_connection_error("[drone] Land", e, hint=True)
-                finally:
-                    _ignore_sigint_during_landing(ignore=False)
+                        _ignore_sigint_during_landing(ignore=True)
+                        print("[drone] Landing...")
+                        try:
+                            await drone.action.land()
+                            await asyncio.sleep(8)
+                        except Exception as e:
+                            _print_connection_error("[drone] Land", e, hint=True)
+                    finally:
+                        _ignore_sigint_during_landing(ignore=False)
         print("[drone] Done.")
     finally:
         mavsdk_server.__exit__(None, None, None)
+
+
+def _exit_if_not_offboard(reason: str) -> None:
+    """Exit the process immediately. Use when --no-takeoff-landing and drone must be OFFBOARD."""
+    print(f"[drone] {reason}", file=sys.stderr)
+    sys.stderr.flush()
+    os._exit(1)
+
+
+async def _require_offboard_mode(drone: System) -> None:
+    """Get current flight mode; if not OFFBOARD, kill the app."""
+    async for mode in drone.telemetry.flight_mode():
+        if mode != FlightMode.OFFBOARD:
+            _exit_if_not_offboard(
+                f"Drone is not in OFFBOARD mode (current: {mode.name}). Exiting."
+            )
+        return
+
+
+async def _watch_offboard_mode(drone: System, shutdown: asyncio.Event) -> None:
+    """Background task: if flight mode ever leaves OFFBOARD, kill the app."""
+    async for mode in drone.telemetry.flight_mode():
+        if shutdown.is_set():
+            return
+        if mode != FlightMode.OFFBOARD:
+            _exit_if_not_offboard(
+                f"Drone left OFFBOARD mode (current: {mode.name}). Exiting."
+            )
 
 
 def _print_connection_error(prefix: str, e: Exception, hint: bool = False) -> None:
@@ -482,25 +529,37 @@ async def run_live_drone(args, shared_state, shutdown, shutdown_read_fd=None, ta
         drone = System()
         await drone.connect(system_address=connection_url)
 
-        print("[drone] Connecting and taking off...")
+        manage_takeoff_landing = not getattr(args, 'no_takeoff_landing', False)
+        if manage_takeoff_landing:
+            print("[drone] Connecting and taking off...")
+        else:
+            print("[drone] Connecting (drone must already be in OFFBOARD)...")
         async for state in drone.core.connection_state():
             if state.is_connected:
                 break
 
-        await drone.action.set_takeoff_altitude(args.takeoff_altitude)
-        await drone.action.arm()
-        await drone.action.takeoff()
-        await asyncio.sleep(15)
+        if manage_takeoff_landing:
+            await drone.action.set_takeoff_altitude(args.takeoff_altitude)
+            await drone.action.arm()
+            await drone.action.takeoff()
+            await asyncio.sleep(15)
+        else:
+            await _require_offboard_mode(drone)
 
         await drone.offboard.set_velocity_body(VelocityBodyYawspeed(0.0, 0.0, 0.0, 0.0))
         await drone.offboard.start()
         offboard_started = True
-        await asyncio.sleep(3)
+        if manage_takeoff_landing:
+            await asyncio.sleep(3)
+        # When not manage_takeoff_landing we do not call offboard.stop() on exit (don't change mode)
 
         if takeoff_done is not None:
             takeoff_done.set()
 
         task = asyncio.create_task(live_control_loop(drone, shared_state, config, shutdown))
+        watch_task = None
+        if not manage_takeoff_landing:
+            watch_task = asyncio.create_task(_watch_offboard_mode(drone, shutdown))
 
         try:
             done, pending = await asyncio.wait(
@@ -521,20 +580,24 @@ async def run_live_drone(args, shared_state, shutdown, shutdown_read_fd=None, ta
         except asyncio.CancelledError:
             print("\n[drone] Shutdown requested, landing...")
         finally:
-            # Land first, before cancelling the control task or quitting pipeline, so the
-            # land command goes out while the connection is still likely alive.
-            if offboard_started and drone is not None:
+            if watch_task is not None:
+                watch_task.cancel()
+                try:
+                    await watch_task
+                except asyncio.CancelledError:
+                    pass
+            if offboard_started and drone is not None and manage_takeoff_landing:
+                try:
+                    await drone.offboard.set_velocity_body(
+                        VelocityBodyYawspeed(0.0, 0.0, 0.0, 0.0))
+                    await drone.offboard.stop()
+                except OffboardError as e:
+                    _print_connection_error("[drone] Offboard stop", e, hint=False)
+                except Exception as e:
+                    _print_connection_error("[drone] Offboard stop", e, hint=False)
                 print("[drone] Landing safely - please wait (ignoring further Ctrl+C until done)...")
                 try:
                     _ignore_sigint_during_landing(ignore=True)
-                    try:
-                        await drone.offboard.set_velocity_body(
-                            VelocityBodyYawspeed(0.0, 0.0, 0.0, 0.0))
-                        await drone.offboard.stop()
-                    except OffboardError as e:
-                        _print_connection_error("[drone] Offboard stop", e, hint=False)
-                    except Exception as e:
-                        _print_connection_error("[drone] Offboard stop", e, hint=False)
                     print("[drone] Landing...")
                     try:
                         await drone.action.land()
