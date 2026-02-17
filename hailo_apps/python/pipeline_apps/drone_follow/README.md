@@ -1,5 +1,38 @@
 # Drone Follow Demo
 
+## Installation
+
+### Prerequisites
+
+- **Hailo application infrastructure** (hailort, hailo-tappas-core, Python bindings). See the [main installation guide](../../../../doc/user_guide/installation.md) for your platform.
+- **Python 3.8+** with the project virtual environment activated (e.g. `source setup_env.sh` or `source venv_hailo_apps/bin/activate`).
+- **MAVSDK** for drone connection and offboard control (installed via pip in the project venv).
+- For **simulation**: PX4 SITL and Gazebo (e.g. `make px4_sitl gz_x500_mono_cam` from PX4-Autopilot).
+- For **real drone**: PX4 (or compatible) firmware and a connection (e.g. USB or UDP).
+
+### Steps
+
+1. **Install hailo-apps** (from the repository root):
+   ```bash
+   cd /path/to/hailo-apps
+   sudo ./install.sh
+   source setup_env.sh
+   ```
+
+2. **Optional – Web UI** (for `--ui` with live video and click-to-follow):
+   ```bash
+   cd hailo_apps/python/pipeline_apps/drone_follow/ui
+   npm install
+   npm run build
+   cd -
+   ```
+   The built UI is served from `ui/build` when you run with `--ui`.
+
+3. **Verify** the app runs (dry-run without Hailo or drone):
+   ```bash
+   python drone_follow.py --dry-run --mock-pattern static
+   ```
+
 ## Instructions
 
 1. Run PX4 SITL with Gazebo and x500 drone with mono camera:
