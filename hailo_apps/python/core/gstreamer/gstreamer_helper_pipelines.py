@@ -1,3 +1,15 @@
+def ANNOTATED_FILE_SINK_PIPELINE(output_file="output.mkv", name="file_sink", bitrate=5000, show_fps=True):
+    """Creates a GStreamer pipeline string for saving the annotated (overlay) video to a file in .mkv format. No FPS overlay for file output."""
+    annotated_file_sink_pipeline = (
+        f"{OVERLAY_PIPELINE(name=f'{name}_overlay')} ! "
+        f"{QUEUE(name=f'{name}_videoconvert_q')} ! "
+        f"videoconvert name={name}_videoconvert n-threads=2 qos=false ! "
+        f"{QUEUE(name=f'{name}_encoder_q')} ! "
+        f"x264enc tune=zerolatency bitrate={bitrate} ! "
+        f"matroskamux ! "
+        f"filesink location={output_file} "
+    )
+    return annotated_file_sink_pipeline
 import os
 
 import yaml
@@ -29,6 +41,8 @@ def get_source_type(input_source):
         return "ximage"
     elif input_source.startswith('rtsp://'):
         return 'rtsp'
+    elif input_source.startswith('udp://'):
+        return 'udp'
     else:
         return "file"
 
@@ -74,6 +88,7 @@ def SOURCE_PIPELINE(
     sync=True,
     video_format="RGB",
     mirror_image=True,
+    input_codec="auto",
 ):
     """Creates a GStreamer pipeline string for the video source with a separate fps caps
     for frame rate control.
@@ -85,6 +100,7 @@ def SOURCE_PIPELINE(
         video_format (str, optional): The video format. Defaults to 'RGB'.
         name (str, optional): The prefix name for the pipeline elements. Defaults to 'source'.
         mirror_image (bool, optional): Whether to horizontally mirror the image (for camera sources). Defaults to True.
+        input_codec (str, optional): Input video codec ('auto', 'h264', 'h265', 'hevc'). Defaults to 'auto'.
 
     Returns:
         str: A string representing the GStreamer pipeline for the video source.
@@ -133,12 +149,59 @@ def SOURCE_PIPELINE(
             f'{QUEUE(name=f"{name}_queue_decode")} ! '
             f'decodebin name={name}_decodebin ! '
         )
-    else:
+    elif source_type == 'udp':  # UDP stream handling (e.g., Gazebo camera)
+        # Extract port from udp://host:port or udp://:port
+        port = video_source.split(':')[-1]
         source_element = (
-            f'filesrc location="{video_source}" name={name} ! '
-            f"{QUEUE(name=f'{name}_queue_decode')} ! "
-            f"decodebin name={name}_decodebin ! "
+            f'udpsrc port={port} name={name} ! '
+            f'application/x-rtp, encoding-name=H264, payload=96 ! '
+            f'{QUEUE(name=f"{name}_queue_decode")} ! '
+            f'rtph264depay ! '
+            f'h264parse ! '
+            f'avdec_h264 name={name}_decodebin ! '
         )
+    else:
+        # File source handling
+        if input_codec != "auto":
+            # Determine container demuxer
+            demuxer = ""
+            if video_source.lower().endswith('.mkv'):
+                demuxer = f"matroskademux name={name}_demux"
+            elif video_source.lower().endswith(('.mp4', '.mov')):
+                demuxer = f"qtdemux name={name}_demux"
+            
+            # Determine decoder pipeline
+            decoder_pipe = ""
+            if demuxer:
+                if input_codec == "h264":
+                    # Fallback to software decoding or specific element if known (v4l2h264dec not found)
+                    # Use decodebin or explicit software decoder if hardware is missing
+                    decoder_pipe = f"{demuxer} ! h264parse ! avdec_h264"
+                elif input_codec in ["h265", "hevc"]:
+                    # Use the stateless decoder found on the system
+                    # Note: v4l2slh265dec on some RPi systems doesn't support capture-io-mode
+                    decoder_pipe = f"{demuxer} ! h265parse ! v4l2slh265dec"
+            
+            if decoder_pipe:
+                source_element = (
+                    f'filesrc location="{video_source}" name={name} ! '
+                    f"{QUEUE(name=f'{name}_queue_decode')} ! "
+                    f"{decoder_pipe} ! "
+                )
+            else:
+                # Fallback to decodebin if codec logic fails (e.g. unknown extension)
+                source_element = (
+                    f'filesrc location="{video_source}" name={name} ! '
+                    f"{QUEUE(name=f'{name}_queue_decode')} ! "
+                    f"decodebin name={name}_decodebin ! "
+                )
+        else:
+            # Auto mode (default decodebin)
+            source_element = (
+                f'filesrc location="{video_source}" name={name} ! '
+                f"{QUEUE(name=f'{name}_queue_decode')} ! "
+                f"decodebin name={name}_decodebin ! "
+            )
 
     # Set up the fps caps.
     # If sync is True, constrain the rate with the given frame_rate.
