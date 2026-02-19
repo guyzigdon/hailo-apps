@@ -160,6 +160,10 @@ class _WebHandler(BaseHTTPRequestHandler):
         "max_forward": float,
         "max_backward": float,
         "yaw_only": bool,
+        "fixed_altitude": bool,
+        "target_bbox_height": float,
+        "dead_zone_height_percent": float,
+        "takeoff_altitude": float,
     }
 
     def _handle_get_config(self):

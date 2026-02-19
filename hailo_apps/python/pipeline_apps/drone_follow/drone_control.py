@@ -8,6 +8,7 @@ import threading
 import time
 from dataclasses import dataclass
 from typing import Optional
+from urllib.parse import urlparse
 
 import mavsdk
 from mavsdk import System
@@ -65,7 +66,7 @@ class ControllerConfig:
     max_down_speed: float = 1.5
     target_bbox_height: float = 0.3
     kp_forward: float = 3.0
-    dead_zone_height: float = 0.05
+    dead_zone_height_percent: float = 5.0  # dead zone as % of target_bbox_height (default 5%)
     max_forward: float = 2.0
     max_backward: float = 2.0
     search_yawspeed: float = 20.0
@@ -75,26 +76,45 @@ class ControllerConfig:
     fixed_altitude: bool = True
     max_bbox_height_safety: float = 0.8  # Safety limit: if bbox height > 0.8, we are too close
     yaw_only: bool = False
+    reference_altitude_m: Optional[float] = None  # When set, target_bbox_height is scaled by (ref_alt/current_alt)
+
+    takeoff_altitude: float = 3.0
 
     @classmethod
     def from_args(cls, args):
+        # Use getattr for all options so we work even if parser namespace is partial.
+        # yaw_only: only True when user explicitly passed --yaw-only (avoid "always on" bug).
+        yaw_only = getattr(args, 'yaw_only', False)
+        if not isinstance(yaw_only, bool):
+            yaw_only = bool(yaw_only)
+        forward_gain = getattr(args, 'forward_gain', 3.0)
+        if forward_gain is None:
+            forward_gain = 3.0
         return cls(
-            hfov=args.hfov,
-            vfov=args.vfov,
-            kp_yaw=args.yaw_gain,
-            kp_down=args.pitch_gain,
-            kp_forward=args.forward_gain,
-            target_bbox_height=args.target_bbox_height,
-            fixed_altitude=args.fixed_altitude,
+            hfov=getattr(args, 'hfov', 66.0),
+            vfov=getattr(args, 'vfov', 41.0),
+            kp_yaw=getattr(args, 'yaw_gain', 2.0),
+            kp_down=getattr(args, 'pitch_gain', 0.08),
+            kp_forward=float(forward_gain),
+            target_bbox_height=getattr(args, 'target_bbox_height', 0.3),
+            dead_zone_height_percent=getattr(args, 'dead_zone_height_percent', 5.0),
+            reference_altitude_m=(ref if (ref := getattr(args, 'reference_altitude', None)) and ref > 0 else None),
+            fixed_altitude=getattr(args, 'fixed_altitude', False),
+            yaw_only=yaw_only,
             detection_timeout_s=getattr(args, 'detection_timeout', 0.5),
             control_loop_hz=getattr(args, 'control_loop_hz', 10.0),
             max_forward=getattr(args, 'max_forward', 1.0),
             max_backward=getattr(args, 'max_backward', 2.0),
             max_bbox_height_safety=getattr(args, 'max_bbox_height_safety', 0.8),
             search_timeout_s=getattr(args, 'search_timeout', 60.0),
+            takeoff_altitude=getattr(args, 'takeoff_altitude', 3.0),
         )
 
-def compute_velocity_command(detection: Optional[Detection], config: ControllerConfig) -> VelocityBodyYawspeed:
+def compute_velocity_command(
+    detection: Optional[Detection],
+    config: ControllerConfig,
+    target_bbox_height_override: Optional[float] = None,
+) -> VelocityBodyYawspeed:
     if detection is None:
         return VelocityBodyYawspeed(0.0, 0.0, 0.0, config.search_yawspeed)
 
@@ -111,16 +131,19 @@ def compute_velocity_command(detection: Optional[Detection], config: ControllerC
         down = 0.0 if abs(error_y_deg) < config.dead_zone_deg else config.kp_down * error_y_deg
         down = max(-config.max_down_speed, min(config.max_down_speed, down))
 
+    # Target bbox height: use override (e.g. from altitude) when provided
+    target_bh = target_bbox_height_override if target_bbox_height_override is not None else config.target_bbox_height
+
     # Forward (Distance) with safety check
-    if config.yaw_only:
+    if config.yaw_only or config.kp_forward == 0:
         forward = 0.0
     elif detection.bbox_height > config.max_bbox_height_safety:
         # Safety Check: If bbox is too big, we are dangerously close
         forward = -config.max_backward
     else:
-        height_error = config.target_bbox_height - detection.bbox_height
-        forward = 0.0 if abs(height_error) < config.dead_zone_height else config.kp_forward * height_error
-
+        height_error = target_bh - detection.bbox_height
+        dead_zone_height = (config.dead_zone_height_percent / 100.0) * target_bh
+        forward = 0.0 if abs(height_error) < dead_zone_height else config.kp_forward * height_error
         # Asymmetric limits: faster backward (negative), slower forward (positive)
         if forward > 0:
             forward = min(config.max_forward, forward)
@@ -145,11 +168,22 @@ class DetachedMavsdkServer:
         self.port = port
         self.process = None
 
+    def _grpc_address_from_connection(self):
+        """Derive gRPC address from connection URL (host from connection, port from self.port)."""
+        try:
+            parsed = urlparse(self.connection_url)
+            host = (parsed.hostname or "127.0.0.1").strip() or "127.0.0.1"
+            if host == "0.0.0.0":
+                host = "127.0.0.1"
+            return f"grpc://{host}:{self.port}"
+        except Exception:
+            return f"grpc://127.0.0.1:{self.port}"
+
     def __enter__(self):
         # If already using grpc, no need to start a server
         if self.connection_url.startswith("grpc://"):
             return self.connection_url
-            
+
         # Try to find mavsdk_server binary
         try:
             server_path = os.path.join(os.path.dirname(mavsdk.__file__), 'bin', 'mavsdk_server')
@@ -191,7 +225,7 @@ class DetachedMavsdkServer:
         
         # Give server a moment to start before returning
         time.sleep(0.5)
-        return f"grpc://127.0.0.1:{self.port}"
+        return self._grpc_address_from_connection()
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         if self.process:
@@ -327,7 +361,15 @@ async def run_drone(
         else:
             await _require_offboard_mode(drone)
 
-        await drone.offboard.set_velocity_body(VelocityBodyYawspeed(0.0, 0.0, 0.0, 0.0))
+        # PX4 requires setpoints to be streamed before offboard.start() (NO_SETPOINT_SET otherwise).
+        setpoint_period_s = 0.05
+        setpoint_duration_s = 1.5
+        deadline = asyncio.get_event_loop().time() + setpoint_duration_s
+        while asyncio.get_event_loop().time() < deadline and not shutdown.is_set():
+            await drone.offboard.set_velocity_body(VelocityBodyYawspeed(0.0, 0.0, 0.0, 0.0))
+            await asyncio.sleep(setpoint_period_s)
+        if shutdown.is_set():
+            return
         await drone.offboard.start()
         offboard_started = True
         # When not manage_takeoff_landing we do not call offboard.stop() on exit (don't change mode)
@@ -452,11 +494,36 @@ def _ignore_sigint_during_landing(ignore: bool) -> None:
 # Live Control Loop (hailo modes)
 # ---------------------------------------------------------------------------
 
-async def live_control_loop(drone, shared_state, config, shutdown):
+def _effective_target_bbox_height(
+    reference_altitude_m: float,
+    target_bbox_height: float,
+    current_altitude_m: float,
+    min_altitude_m: float = 0.5,
+    max_target: float = 0.9,
+) -> float:
+    """Target bbox height from altitude: at reference_altitude we want target_bbox_height; scales inversely with altitude."""
+    alt = max(current_altitude_m, min_altitude_m)
+    effective = (reference_altitude_m * target_bbox_height) / alt
+    return min(effective, max_target)
+
+
+async def _telemetry_altitude_task(drone, altitude_cache: dict, shutdown: asyncio.Event) -> None:
+    """Background task: stream position and store relative altitude (m) in altitude_cache['m']."""
+    try:
+        async for position in drone.telemetry.position():
+            if shutdown.is_set():
+                return
+            altitude_cache["m"] = position.relative_altitude_m
+    except Exception:
+        pass
+
+
+async def live_control_loop(drone, shared_state, config, shutdown, altitude_cache: Optional[dict] = None):
     """Control loop for Hailo modes.
 
     Reads detections from shared_state, computes velocity commands.
     If drone is None (hailo-dry-run), prints commands instead.
+    When config.reference_altitude_m is set and altitude_cache is provided, target bbox height is scaled by altitude.
     """
     period = 1.0 / config.control_loop_hz
     last_detection_time = time.monotonic()
@@ -479,7 +546,14 @@ async def live_control_loop(drone, shared_state, config, shutdown):
                 shutdown.set()
                 break
 
-            cmd = compute_velocity_command(detection, config)
+            target_override = None
+            if config.reference_altitude_m is not None and altitude_cache and altitude_cache.get("m") is not None:
+                target_override = _effective_target_bbox_height(
+                    config.reference_altitude_m,
+                    config.target_bbox_height,
+                    altitude_cache["m"],
+                )
+            cmd = compute_velocity_command(detection, config, target_bbox_height_override=target_override)
             if drone is not None:
                 await drone.offboard.set_velocity_body(cmd)
             else:
@@ -546,8 +620,33 @@ async def run_live_drone(args, shared_state, shutdown, shutdown_read_fd=None, ta
         else:
             await _require_offboard_mode(drone)
 
-        await drone.offboard.set_velocity_body(VelocityBodyYawspeed(0.0, 0.0, 0.0, 0.0))
-        await drone.offboard.start()
+        # PX4 requires setpoints to be streamed before offboard.start() (NO_SETPOINT_SET otherwise).
+        # Stream zero setpoint at ~20 Hz.
+        setpoint_period_s = 0.05
+        
+        # Initial stream of setpoints
+        for _ in range(int(2.0 / setpoint_period_s)):
+            if shutdown.is_set():
+                return
+            await drone.offboard.set_velocity_body(VelocityBodyYawspeed(0.0, 0.0, 0.0, 0.0))
+            await asyncio.sleep(setpoint_period_s)
+
+        # Try to start offboard mode, with retry
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                await drone.offboard.start()
+                break
+            except OffboardError as e:
+                if attempt == max_retries - 1:
+                    raise
+                print(f"[drone] Failed to start offboard ({e}), retrying...")
+                # Send more setpoints before retrying
+                for _ in range(int(1.0 / setpoint_period_s)):
+                    if shutdown.is_set():
+                        return
+                    await drone.offboard.set_velocity_body(VelocityBodyYawspeed(0.0, 0.0, 0.0, 0.0))
+                    await asyncio.sleep(setpoint_period_s)
         offboard_started = True
         if manage_takeoff_landing:
             await asyncio.sleep(3)
@@ -556,7 +655,12 @@ async def run_live_drone(args, shared_state, shutdown, shutdown_read_fd=None, ta
         if takeoff_done is not None:
             takeoff_done.set()
 
-        task = asyncio.create_task(live_control_loop(drone, shared_state, config, shutdown))
+        altitude_cache: dict = {}
+        alt_task = None
+        if drone is not None and getattr(config, 'reference_altitude_m', None) is not None:
+            alt_task = asyncio.create_task(_telemetry_altitude_task(drone, altitude_cache, shutdown))
+
+        task = asyncio.create_task(live_control_loop(drone, shared_state, config, shutdown, altitude_cache))
         watch_task = None
         if not manage_takeoff_landing:
             watch_task = asyncio.create_task(_watch_offboard_mode(drone, shutdown))
@@ -580,6 +684,12 @@ async def run_live_drone(args, shared_state, shutdown, shutdown_read_fd=None, ta
         except asyncio.CancelledError:
             print("\n[drone] Shutdown requested, landing...")
         finally:
+            if alt_task is not None:
+                alt_task.cancel()
+                try:
+                    await alt_task
+                except asyncio.CancelledError:
+                    pass
             if watch_task is not None:
                 watch_task.cancel()
                 try:

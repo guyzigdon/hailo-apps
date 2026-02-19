@@ -19,7 +19,14 @@
    source setup_env.sh
    ```
 
-2. **Optional – Web UI** (for `--ui` with live video and click-to-follow):
+2. **Install Python dependencies**:
+   ```bash
+   pip install -r hailo_apps/python/pipeline_apps/drone_follow/requirements.txt
+   ```
+
+3. **Optional – Web UI** (for `--ui` with live video and click-to-follow):
+
+   Requires **Node.js / npm** to be installed.
    ```bash
    cd hailo_apps/python/pipeline_apps/drone_follow/ui
    npm install
@@ -27,8 +34,9 @@
    cd -
    ```
    The built UI is served from `ui/build` when you run with `--ui`.
+   Running with `--ui` without building first will exit with an error message.
 
-3. **Verify** the app runs (dry-run without Hailo or drone):
+4. **Verify** the app runs (dry-run without Hailo or drone):
    ```bash
    python drone_follow.py --dry-run --mock-pattern static
    ```
@@ -54,6 +62,50 @@
    ```bash
    python drone_follow.py --input udp://0.0.0.0:5600 --target-bbox-height 0.5
    ```
+
+### Running drone_follow on a different PC than the simulation
+
+You can run the PX4 SITL simulation (e.g. on a Raspberry Pi) on one machine and the drone_follow application on another. Video and MAVLink are sent over UDP to the host running drone_follow.
+
+**1. On the simulation machine (e.g. RPI with PX4 SITL)**
+
+Set the video/MAVLink host to the IP of the PC that will run drone_follow, then start PX4:
+
+```bash
+PX4_VIDEO_HOST_IP=<MAVLINK_HOST_IP> make px4_sitl gz_x500_mono_cam
+```
+
+Replace `<MAVLINK_HOST_IP>` with the IP address of the machine where you run `drone_follow.py`.
+
+**2. (Optional) Persistent MAVLink config on PX4**
+
+You can add this to `ROMFS/px4fmu_common/init.d-posix/px4-rc.mavlink` so MAVLink targets the drone_follow host:
+
+```bash
+mavlink start -t <MAVLINK_HOST_IP> -o 14560 -r 100000
+```
+
+**3. On the drone_follow machine**
+
+Run the app so it listens for video on UDP 5600 and MAVLink on UDP 14560:
+
+```bash
+python drone_follow.py --input udp://0.0.0.0:5600 --connection udp://0.0.0.0:14560 --target-bbox-height 0.5
+```
+
+Ensure the video bridge (or PX4 video stream) and MAVLink are sent to this machine’s IP; use the same ports (5600 for video, 14560 for MAVLink) on the simulation side.
+
+### Optional: custom SDF worlds
+
+Example Gazebo worlds are in `sdf_examples/`:
+
+- **`2_persons_diagonal.sdf`** – Two persons walking diagonally toward each other (from (-5,-5) to (5,5) and the reverse), then looping. Uses the `Walking actor` model. Load in Gazebo or pass as the world file for your PX4/Gazebo run if your setup supports it.
+- **`2_person_world.sdf`** – Two walking actors at fixed start positions.
+- **`random_walk.sdf`** – Single actor with a long random-walk trajectory.
+
+#### Person actor model
+
+The `sdf_examples/model.sdf` and `sdf_examples/model.config` files define a walking person actor model for Gazebo. To use it, copy or symlink the `sdf_examples/` directory into your Gazebo models path (e.g. `~/.gz/models/Walking/`) or reference it directly from your world SDF.
 
 ## HTTP Control Server
 
@@ -117,3 +169,9 @@ When running with `--enable-tracking`, you can select a specific person to follo
 ### Configuration
 
 - Change the server port with `--follow-server-port <port>` (default: 8080)
+
+## Yaw-Only Mode
+
+Use `--yaw-only` to disable all forward/backward and altitude movement. The drone will only rotate to keep the person centered in the frame. This is also available as a toggle in the web UI.
+
+Note: `--forward-gain 0` now also fully disables forward/backward motion (including the safety backward retreat).

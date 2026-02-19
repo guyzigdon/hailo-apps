@@ -54,6 +54,9 @@ venv_hailo_apps/
 resources/
 resources
 
+# Node (drone_follow UI)
+node_modules/
+
 # IDE configuration files (user-specific)
 .vscode/launch.json
 .cursor/

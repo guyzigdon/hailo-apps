@@ -63,7 +63,7 @@ def _maybe_clear_target_after_lost(user_data):
     target_id = target_state.get_target()
     if target_id is None:
         return
-    last_seen = target_state.get_last_seen()
+    last_seen = target_state._last_seen
     if last_seen is None:
         target_state.set_target(None)
         return
@@ -200,11 +200,16 @@ def app_callback(element, buffer, user_data):
                 print(f"\r[SEARCH MODE] Target ID {target_id} not in frame. Available: {sorted(available_ids) if available_ids else 'none'} - follow state cleared", end="", flush=True)
             return
     else:
-        # No specific target, pick the largest person
+        # No specific target yet — pick the largest person and lock onto their track ID
         best = max(persons, key=lambda d: d.get_bbox().width() * d.get_bbox().height())
         best_tid = _find_track_id(best, person_by_id)
         if best_tid is not None:
-            follow_mode = f"largest (ID {best_tid})"
+            # Auto-lock: set this track as our follow target so we stick to it
+            if hasattr(user_data, 'target_state') and user_data.target_state is not None:
+                user_data.target_state.set_target(best_tid)
+                follow_mode = f"locked ID {best_tid}"
+            else:
+                follow_mode = f"largest (ID {best_tid})"
         else:
             follow_mode = "largest (no tracking)"
 
@@ -251,7 +256,12 @@ def _add_drone_follow_args(parser):
                        help="Run Hailo pipeline + connect and control simulation (Gazebo)")
     group.add_argument("--dry-run", action="store_true",
                        help="Mock detections + real drone (Gazebo)")
-    group.add_argument("--target-bbox-height", type=float, default=0.3)
+    group.add_argument("--target-bbox-height", type=float, default=0.3,
+                       help="Target bbox height (0-1). When --reference-altitude is set, this is the value at that altitude.")
+    group.add_argument("--reference-altitude", type=float, default=3.0, metavar="M",
+                       help="Reference altitude in metres for target bbox. At this altitude we use --target-bbox-height; at other altitudes target scales inversely. Set to 0 to disable (default: 3)")
+    group.add_argument("--dead-zone-height-percent", type=float, default=5.0,
+                       help="Forward dead zone as %% of target bbox height (default: 5)")
     group.add_argument("--yaw-gain", type=float, default=2.0)
     group.add_argument("--forward-gain", type=float, default=3.0)
     group.add_argument("--pitch-gain", type=float, default=0.08)
@@ -263,6 +273,8 @@ def _add_drone_follow_args(parser):
     group.add_argument("--hfov", type=float, default=66.0)
     group.add_argument("--vfov", type=float, default=41.0)
     group.add_argument("--fixed-altitude", action="store_true")
+    group.add_argument("--yaw-only", action="store_true",
+                       help="Yaw only mode: no forward/backward or altitude movement")
     group.add_argument("--detection-timeout", type=float, default=0.5,
                        help="Seconds before a stale detection triggers search mode")
     group.add_argument("--tracking-lost-timeout", type=float, default=2.0,
@@ -434,8 +446,9 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
 
             user_callback_pipeline = USER_CALLBACK_PIPELINE()
 
-            # Display branch (with overlay)
-            if self.no_display:
+            # Display branch (with overlay). Only disable when user passed --no-display.
+            no_display = getattr(self.options_menu, 'no_display', False)
+            if no_display:
                 display_branch = f"fakesink sync={self.sync}"
             else:
                 display_branch = DISPLAY_PIPELINE(
@@ -595,6 +608,15 @@ def main():
             except ImportError:
                 from .web_server import WebServer, SharedUIState
             ui_state = SharedUIState()
+            # Check that the UI has been built
+            _ui_build_index = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)), "ui", "build", "index.html")
+            if not os.path.isfile(_ui_build_index):
+                print("ERROR: Web UI has not been built yet.")
+                print("  cd hailo_apps/python/pipeline_apps/drone_follow/ui")
+                print("  npm install")
+                print("  npm run build")
+                raise SystemExit(1)
             # Auto-enable tracking for UI (stable IDs needed for click-to-follow)
             if not ui_pre_args.enable_tracking:
                 import sys as _sys
