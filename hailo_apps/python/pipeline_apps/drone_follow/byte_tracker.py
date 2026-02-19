@@ -305,16 +305,16 @@ def sub_stracks(tlista, tlistb):
 def remove_duplicate_stracks(stracksa, stracksb):
     pdist = iou_batch([t.tlbr for t in stracksa], [t.tlbr for t in stracksb])
     pairs = np.where(pdist < 0.15)
-    dupa, dupb = list(pairs[0]), list(pairs[1])
-    for a, b in zip(dupa, dupb):
+    dupa, dupb = set(), set()
+    for a, b in zip(pairs[0], pairs[1]):
         timep = stracksa[a].frame_id - stracksa[a].start_frame
         timeq = stracksb[b].frame_id - stracksb[b].start_frame
         if timep > timeq:
-            dupb.append(b)
+            dupb.add(b)
         else:
-            dupa.append(a)
-    res_a = [t for i, t in enumerate(stracksa) if not i in dupa]
-    res_b = [t for i, t in enumerate(stracksb) if not i in dupb]
+            dupa.add(a)
+    res_a = [t for i, t in enumerate(stracksa) if i not in dupa]
+    res_b = [t for i, t in enumerate(stracksb) if i not in dupb]
     return res_a, res_b
 
 class ByteTracker:

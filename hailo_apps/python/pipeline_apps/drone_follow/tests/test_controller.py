@@ -158,7 +158,8 @@ class TestForward:
 
     def test_height_dead_zone(self, config):
         """Bbox slightly off target but within dead zone -> zero forward."""
-        small_offset = config.dead_zone_height * 0.5
+        dead_zone = (config.dead_zone_height_percent / 100.0) * config.target_bbox_height
+        small_offset = dead_zone * 0.5
         cmd = compute_velocity_command(
             _det(bh=config.target_bbox_height + small_offset), config
         )
@@ -188,7 +189,7 @@ class TestCombined:
 
     def test_all_axes_active(self):
         """Target off-center in all axes simultaneously."""
-        config = ControllerConfig(dead_zone_deg=0.0, dead_zone_height=0.0, fixed_altitude=False)
+        config = ControllerConfig(dead_zone_deg=0.0, dead_zone_height_percent=0.0, fixed_altitude=False)
         cmd = compute_velocity_command(
             _det(cx=0.7, cy=0.3, bh=0.15), config
         )
@@ -200,14 +201,14 @@ class TestCombined:
         """Custom gain values should scale the output proportionally."""
         cfg_low = ControllerConfig(
             kp_yaw=1.0, kp_down=0.04, kp_forward=1.5,
-            dead_zone_deg=0.0, dead_zone_height=0.0,
+            dead_zone_deg=0.0, dead_zone_height_percent=0.0,
             fixed_altitude=False,
             max_yawspeed=9999.0, max_down_speed=9999.0,
             max_forward=9999.0, max_backward=9999.0,
         )
         cfg_high = ControllerConfig(
             kp_yaw=2.0, kp_down=0.08, kp_forward=3.0,
-            dead_zone_deg=0.0, dead_zone_height=0.0,
+            dead_zone_deg=0.0, dead_zone_height_percent=0.0,
             fixed_altitude=False,
             max_yawspeed=9999.0, max_down_speed=9999.0,
             max_forward=9999.0, max_backward=9999.0,
