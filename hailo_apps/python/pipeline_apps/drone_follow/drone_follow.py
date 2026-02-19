@@ -265,7 +265,14 @@ def _add_drone_follow_args(parser):
     group.add_argument("--yaw-gain", type=float, default=2.0)
     group.add_argument("--forward-gain", type=float, default=3.0)
     group.add_argument("--pitch-gain", type=float, default=0.08)
-    group.add_argument("--connection", default="udpin://0.0.0.0:14540")
+    group.add_argument("--connection", default="udpin://0.0.0.0:14540",
+                       help="MAVLink connection string (default: udpin://0.0.0.0:14540)")
+    group.add_argument("--serial", nargs="?", const="/dev/ttyACM0", default=None,
+                       metavar="DEVICE",
+                       help="Connect to CubeOrange via serial cable instead of UDP. "
+                            "Optionally specify device path (default: /dev/ttyACM0)")
+    group.add_argument("--serial-baud", type=int, default=57600,
+                       help="Baud rate for serial connection (default: 57600)")
     group.add_argument("--no-takeoff-landing", action="store_true",
                        help="Do not take off or land; assume drone is already in offboard mode")
     group.add_argument("--takeoff-altitude", type=float, default=3.0)
@@ -308,6 +315,14 @@ def _add_drone_follow_args(parser):
                        help="Safety limit: stop/retreat if bbox height > limit (0.0-1.0) (default: 0.8)")
     group.add_argument("--search-timeout", type=float, default=60.0,
                        help="Seconds before landing if no person is found (default: 60.0)")
+
+
+def _resolve_serial_connection(args):
+    """If --serial is given, override --connection with a serial:// URI."""
+    if getattr(args, "serial", None) is not None:
+        baud = getattr(args, "serial_baud", 57600)
+        args.connection = f"serial://{args.serial}:{baud}"
+        print(f"[drone] Serial mode: connection = {args.connection}")
 
 
 def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None, ui_fps=10):
@@ -519,7 +534,8 @@ def main():
         parser = argparse.ArgumentParser()
         _add_drone_follow_args(parser)
         args = parser.parse_args()
-        
+        _resolve_serial_connection(args)
+
         # Start follow server (won't do much in mock mode but available for consistency)
         target_state = FollowTargetState()
         shared_state_for_dry_run = SharedDetectionState()
@@ -626,6 +642,7 @@ def main():
         app = create_app(shared_state, target_state=target_state, eos_reached=eos_reached,
                          ui_state=ui_state, ui_fps=ui_pre_args.ui_fps)
         args = app.options_menu
+        _resolve_serial_connection(args)
 
         # Create controller config once so it can be shared (and mutated via web UI)
         controller_config = ControllerConfig.from_args(args)
