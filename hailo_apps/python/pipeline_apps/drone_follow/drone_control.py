@@ -59,96 +59,174 @@ class SharedDetectionState:
 class ControllerConfig:
     hfov: float = 66.0
     vfov: float = 41.0
-    kp_yaw: float = 2.0
+    kp_yaw: float = 5
     dead_zone_deg: float = 2.0
     max_yawspeed: float = 90.0
     kp_down: float = 0.08
     max_down_speed: float = 1.5
     target_bbox_height: float = 0.3
-    kp_forward: float = 3.0
+    kp_forward: float = 6.0
+    kp_backward: float = 7.5
     dead_zone_height_percent: float = 5.0  # dead zone as % of target_bbox_height (default 5%)
     max_forward: float = 2.0
-    max_backward: float = 2.0
-    search_yawspeed: float = 20.0
+    max_backward: float = 3.0
     detection_timeout_s: float = 0.5
+    search_enter_delay_s: float = 2.0
     search_timeout_s: float = 60.0
     control_loop_hz: float = 10.0
     fixed_altitude: bool = True
     max_bbox_height_safety: float = 0.8  # Safety limit: if bbox height > 0.8, we are too close
     yaw_only: bool = False
-    reference_altitude_m: Optional[float] = None  # When set, target_bbox_height is scaled by (ref_alt/current_alt)
+    reference_altitude_m: float = 3.0  # target_bbox_height is defined at this altitude; scales by (ref_alt/current_alt)
+    # Bottom-of-frame backward: bbox bottom edge beyond this triggers backward
+    bottom_y_threshold: float = 0.85
+    # Search mode
+    search_yawspeed_slow: float = 10.0  # yaw speed during search (slower than tracking)
+    search_vel_damp: float = 0.3        # dampening factor for forward/backward speed during search
+    min_search_forward: float = 0.2     # minimum forward speed in search when last bbox was too small
 
     takeoff_altitude: float = 3.0
 
     @classmethod
     def from_args(cls, args):
-        # Use getattr for all options so we work even if parser namespace is partial.
-        # yaw_only: only True when user explicitly passed --yaw-only (avoid "always on" bug).
-        yaw_only = getattr(args, 'yaw_only', False)
+        # Single source of defaults: dataclass values.
+        defaults = cls()
+
+        def _arg(*names, default):
+            for name in names:
+                value = getattr(args, name, None)
+                if value is not None:
+                    return value
+            return default
+
+        # yaw_only: only True when user explicitly passed --yaw-only.
+        yaw_only = _arg("yaw_only", default=defaults.yaw_only)
         if not isinstance(yaw_only, bool):
             yaw_only = bool(yaw_only)
-        forward_gain = getattr(args, 'forward_gain', 3.0)
-        if forward_gain is None:
-            forward_gain = 3.0
+
+        ref_alt = _arg("reference_altitude", "reference_altitude_m", default=defaults.reference_altitude_m)
+        ref_alt = ref_alt if ref_alt and ref_alt > 0 else defaults.reference_altitude_m
+
         return cls(
-            hfov=getattr(args, 'hfov', 66.0),
-            vfov=getattr(args, 'vfov', 41.0),
-            kp_yaw=getattr(args, 'yaw_gain', 2.0),
-            kp_down=getattr(args, 'pitch_gain', 0.08),
-            kp_forward=float(forward_gain),
-            target_bbox_height=getattr(args, 'target_bbox_height', 0.3),
-            dead_zone_height_percent=getattr(args, 'dead_zone_height_percent', 5.0),
-            reference_altitude_m=(ref if (ref := getattr(args, 'reference_altitude', None)) and ref > 0 else None),
-            fixed_altitude=getattr(args, 'fixed_altitude', False),
+            hfov=_arg("hfov", default=defaults.hfov),
+            vfov=_arg("vfov", default=defaults.vfov),
+            kp_yaw=_arg("kp_yaw", "yaw_gain", default=defaults.kp_yaw),
+            kp_down=_arg("kp_down", "pitch_gain", default=defaults.kp_down),
+            kp_forward=float(_arg("kp_forward", "forward_gain", default=defaults.kp_forward)),
+            kp_backward=_arg("kp_backward", "backward_gain", default=defaults.kp_backward),
+            target_bbox_height=_arg("target_bbox_height", default=defaults.target_bbox_height),
+            dead_zone_height_percent=_arg("dead_zone_height_percent", default=defaults.dead_zone_height_percent),
+            reference_altitude_m=ref_alt,
+            fixed_altitude=_arg("fixed_altitude", default=defaults.fixed_altitude),
             yaw_only=yaw_only,
-            detection_timeout_s=getattr(args, 'detection_timeout', 0.5),
-            control_loop_hz=getattr(args, 'control_loop_hz', 10.0),
-            max_forward=getattr(args, 'max_forward', 1.0),
-            max_backward=getattr(args, 'max_backward', 2.0),
-            max_bbox_height_safety=getattr(args, 'max_bbox_height_safety', 0.8),
-            search_timeout_s=getattr(args, 'search_timeout', 60.0),
-            takeoff_altitude=getattr(args, 'takeoff_altitude', 3.0),
+            detection_timeout_s=_arg("detection_timeout", "detection_timeout_s", default=defaults.detection_timeout_s),
+            search_enter_delay_s=_arg("search_enter_delay", "search_enter_delay_s", default=defaults.search_enter_delay_s),
+            control_loop_hz=_arg("control_loop_hz", default=defaults.control_loop_hz),
+            max_forward=_arg("max_forward", default=defaults.max_forward),
+            max_backward=_arg("max_backward", default=defaults.max_backward),
+            max_bbox_height_safety=_arg("max_bbox_height_safety", default=defaults.max_bbox_height_safety),
+            search_timeout_s=_arg("search_timeout", "search_timeout_s", default=defaults.search_timeout_s),
+            search_vel_damp=_arg("search_vel_damp", default=defaults.search_vel_damp),
+            takeoff_altitude=_arg("takeoff_altitude", default=defaults.takeoff_altitude),
         )
+
+def _calculate_forward_speed(
+    detection: Detection,
+    config: ControllerConfig,
+    target_bh: float,
+    explain: Optional[dict] = None,
+) -> float:
+    """Calculate forward/backward speed based on bbox height and bottom-of-frame position."""
+    if config.yaw_only or config.kp_forward == 0:
+        if explain is not None:
+            explain.update(mode="disabled", target_bh=target_bh,
+                           bbox_h=detection.bbox_height, final_forward=0.0)
+        return 0.0
+
+    if detection.bbox_height > config.max_bbox_height_safety:
+        if explain is not None:
+            explain.update(mode="safety_retreat", target_bh=target_bh,
+                           bbox_h=detection.bbox_height, final_forward=-config.max_backward)
+        return -config.max_backward
+
+    height_delta = target_bh - detection.bbox_height
+    dead_zone_height = (config.dead_zone_height_percent / 100.0) * target_bh
+    reason = "dead_zone"
+
+    if abs(height_delta) < dead_zone_height:
+        forward = 0.0
+    elif height_delta > 0:
+        forward = config.kp_forward * math.sqrt(height_delta)
+        reason = "too_small"
+    else:
+        forward = -config.kp_backward * math.sqrt(-height_delta)
+        reason = "too_big"
+    raw_forward = forward
+
+    # Bottom-of-frame backward: bbox bottom edge past threshold means drone is above and too close
+    bottom_backward = 0.0
+    max_y = detection.center_y + detection.bbox_height / 2
+    if max_y > config.bottom_y_threshold:
+        y_excess = max_y - config.bottom_y_threshold
+        bottom_backward = config.kp_backward * math.sqrt(y_excess)
+        forward = min(forward, -bottom_backward)
+
+    # Clamp
+    forward = max(-config.max_backward, min(config.max_forward, forward))
+
+    if explain is not None:
+        explain.update(mode="normal", reason=reason, target_bh=target_bh,
+                       bbox_h=detection.bbox_height, height_delta=height_delta,
+                       dead_zone=dead_zone_height, raw_forward=raw_forward,
+                       bottom_backward=bottom_backward, final_forward=forward)
+
+    return forward
+
 
 def compute_velocity_command(
     detection: Optional[Detection],
     config: ControllerConfig,
     target_bbox_height_override: Optional[float] = None,
+    search_direction: float = 1.0,
+    last_detection: Optional[Detection] = None,
+    search_active: bool = True,
+    hold_velocity: Optional[VelocityBodyYawspeed] = None,
 ) -> VelocityBodyYawspeed:
-    if detection is None:
-        return VelocityBodyYawspeed(0.0, 0.0, 0.0, config.search_yawspeed)
+    target_bh = target_bbox_height_override if target_bbox_height_override is not None else config.target_bbox_height
 
+    # --- Search mode: no current detection ---
+    if detection is None:
+        if not search_active:
+            return hold_velocity if hold_velocity is not None else VelocityBodyYawspeed(0.0, 0.0, 0.0, 0.0)
+        # Spin toward last seen direction with damped forward correction
+        search_forward = 0.0
+        if last_detection is not None:
+            raw = _calculate_forward_speed(last_detection, config, target_bh)
+            search_forward = raw * config.search_vel_damp
+            dead_zone = (config.dead_zone_height_percent / 100.0) * target_bh
+            if raw > 0 and (target_bh - last_detection.bbox_height) > dead_zone:
+                search_forward = max(search_forward, config.min_search_forward)
+            search_forward = min(config.max_forward, search_forward)
+        return VelocityBodyYawspeed(search_forward, 0.0, 0.0, search_direction * config.search_yawspeed_slow)
+
+    # --- Tracking mode ---
     error_x_deg = (detection.center_x - 0.5) * config.hfov
     error_y_deg = (detection.center_y - 0.5) * config.vfov
 
-    # Yaw (Spin)
-    yawspeed = 0.0 if abs(error_x_deg) < config.dead_zone_deg else config.kp_yaw * error_x_deg
+    # Yaw: signed square-root response
+    if abs(error_x_deg) < config.dead_zone_deg:
+        yawspeed = 0.0
+    else:
+        yawspeed = math.copysign(config.kp_yaw * math.sqrt(abs(error_x_deg)), error_x_deg)
     yawspeed = max(-config.max_yawspeed, min(config.max_yawspeed, yawspeed))
 
-    # Altitude (Climb)
+    # Altitude
     down = 0.0
     if not config.fixed_altitude:
         down = 0.0 if abs(error_y_deg) < config.dead_zone_deg else config.kp_down * error_y_deg
         down = max(-config.max_down_speed, min(config.max_down_speed, down))
 
-    # Target bbox height: use override (e.g. from altitude) when provided
-    target_bh = target_bbox_height_override if target_bbox_height_override is not None else config.target_bbox_height
-
-    # Forward (Distance) with safety check
-    if config.yaw_only or config.kp_forward == 0:
-        forward = 0.0
-    elif detection.bbox_height > config.max_bbox_height_safety:
-        # Safety Check: If bbox is too big, we are dangerously close
-        forward = -config.max_backward
-    else:
-        height_error = target_bh - detection.bbox_height
-        dead_zone_height = (config.dead_zone_height_percent / 100.0) * target_bh
-        forward = 0.0 if abs(height_error) < dead_zone_height else config.kp_forward * height_error
-        # Asymmetric limits: faster backward (negative), slower forward (positive)
-        if forward > 0:
-            forward = min(config.max_forward, forward)
-        else:
-            forward = max(-config.max_backward, forward)
+    forward = _calculate_forward_speed(detection, config, target_bh)
 
     return VelocityBodyYawspeed(forward, 0.0, down, yawspeed)
 
@@ -194,34 +272,15 @@ class DetachedMavsdkServer:
             print(f"[drone] Warning: mavsdk_server not found at {server_path}, using default System() behavior")
             return self.connection_url # Fallback to default behavior
 
-        # Pick a random port to avoid conflicts? 50051 is default.
-        # Let's use 50051 for now.
         cmd = [server_path, "-u", self.connection_url, "-p", str(self.port)]
         print(f"[drone] Starting detached mavsdk_server: {' '.join(cmd)}")
-        print(f"[drone] NOTE: The following ERROR messages from mavsdk_server are expected and harmless:")
-        print(f"[drone]   - 'Unknown protocol' and 'Connection failed: Invalid connection URL'")
-        print(f"[drone]   These occur during initial startup and can be safely ignored.")
-        
-        # start_new_session=True creates a new process group/session, 
-        # isolating it from terminal signals like SIGINT
-        # Redirect both stdout and stderr to suppress mavsdk_server's own logging
-        try:
-            devnull = open(os.devnull, 'w')
-            self.process = subprocess.Popen(
-                cmd, 
-                stdout=devnull, 
-                stderr=devnull,
-                start_new_session=True,
-                close_fds=True
-            )
-        except Exception:
-            # Fallback if devnull approach fails
-            self.process = subprocess.Popen(
-                cmd, 
-                stdout=subprocess.DEVNULL, 
-                stderr=subprocess.DEVNULL,
-                start_new_session=True
-            )
+
+        self.process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
         
         # Give server a moment to start before returning
         time.sleep(0.5)
@@ -253,36 +312,20 @@ def apply_physics_step(cx, cy, bh, cmd, dt, config):
 async def mock_control_loop(drone, shared_state, config, pattern, initial_x, initial_y, circle_diameter_m: float = 10.0):
     period = 1.0 / config.control_loop_hz
     t0 = time.monotonic()
-    # Scale circle motion by diameter (reference 10 m = current default behavior)
     circle_scale = circle_diameter_m / 10.0
-
-    # Internal state: where the "person" is relative to camera
     cx, cy, bh = initial_x, initial_y, config.target_bbox_height * 0.1
-    
-    last_detection_time = time.monotonic()
 
     try:
         while True:
             t = time.monotonic() - t0
 
-            # 1. Update shared state
             shared_state.update(Detection("person", 0.99, cx, cy, bh, time.monotonic()))
-            # Since we always simulate a detection here in mock mode, we update last_detection_time
-            last_detection_time = time.monotonic()
-
-            # 2. Get commands
             detection, _ = shared_state.get_latest()
-            
-            # (In mock mode we don't really lose detection unless we simulate it, 
-            # so the timeout check is less critical here but good for consistency)
-            if time.monotonic() - last_detection_time > config.search_timeout_s:
-                print(f"\n[SIM] Search timeout ({config.search_timeout_s}s) exceeded. Landing...")
-                break
 
             cmd = compute_velocity_command(detection, config)
             await drone.offboard.set_velocity_body(cmd)
 
-            # 3. Apply World Movement (The Person Walking)
+            # Apply world movement (the person walking)
             dx, dy, dbh = 0.0, 0.0, 0.0
             if pattern == "circle":
                 dx = 0.02 * circle_scale * math.cos(2 * math.pi * t / 10.0)   # Horizontal drift
@@ -414,27 +457,25 @@ async def run_drone(
                 pass
             except Exception:
                 pass
-            if offboard_started and drone is not None:
-                if manage_takeoff_landing:
+            if offboard_started and drone is not None and manage_takeoff_landing:
+                try:
+                    await drone.offboard.set_velocity_body(VelocityBodyYawspeed(0.0, 0.0, 0.0, 0.0))
+                    await drone.offboard.stop()
+                except OffboardError as e:
+                    print(f"[drone] Offboard stop: {e._result.result}")
+                except Exception as e:
+                    _print_connection_error("[drone] Offboard stop", e)
+                print("[drone] Landing safely - please wait (ignoring further Ctrl+C until done)...")
+                try:
+                    _ignore_sigint_during_landing(ignore=True)
+                    print("[drone] Landing...")
                     try:
-                        await drone.offboard.set_velocity_body(VelocityBodyYawspeed(0.0, 0.0, 0.0, 0.0))
-                        await drone.offboard.stop()
-                    except OffboardError as e:
-                        print(f"[drone] Offboard stop: {e._result.result}")
+                        await drone.action.land()
+                        await asyncio.sleep(8)
                     except Exception as e:
-                        _print_connection_error("[drone] Offboard stop", e)
-                if manage_takeoff_landing:
-                    print("[drone] Landing safely - please wait (ignoring further Ctrl+C until done)...")
-                    try:
-                        _ignore_sigint_during_landing(ignore=True)
-                        print("[drone] Landing...")
-                        try:
-                            await drone.action.land()
-                            await asyncio.sleep(8)
-                        except Exception as e:
-                            _print_connection_error("[drone] Land", e, hint=True)
-                    finally:
-                        _ignore_sigint_during_landing(ignore=False)
+                        _print_connection_error("[drone] Land", e, hint=True)
+                finally:
+                    _ignore_sigint_during_landing(ignore=False)
         print("[drone] Done.")
     finally:
         mavsdk_server.__exit__(None, None, None)
@@ -518,33 +559,66 @@ async def _telemetry_altitude_task(drone, altitude_cache: dict, shutdown: asynci
         pass
 
 
-async def live_control_loop(drone, shared_state, config, shutdown, altitude_cache: Optional[dict] = None):
+async def live_control_loop(drone, shared_state, config, shutdown, altitude_cache: Optional[dict] = None, ui_state=None):
     """Control loop for Hailo modes.
 
     Reads detections from shared_state, computes velocity commands.
     If drone is None (hailo-dry-run), prints commands instead.
     When config.reference_altitude_m is set and altitude_cache is provided, target bbox height is scaled by altitude.
+    If ui_state is provided, logs are also pushed to the web UI.
     """
-    period = 1.0 / config.control_loop_hz
+    def _log(msg):
+        if ui_state is not None:
+            ui_state.push_log(msg)
+        else:
+            print(msg, flush=True)
+
+    period = 1.0 / max(0.1, min(config.control_loop_hz, 5.0))
     last_detection_time = time.monotonic()
-    
+    search_direction = 1.0
+    last_valid_detection: Optional[Detection] = None
+    _prev_takeoff_alt = config.takeoff_altitude
+    _goto_altitude = None
+    _prev_cmd: Optional[VelocityBodyYawspeed] = None
+
+    # Constants
+    _GOTO_KP = 0.5
+    _GOTO_MAX_SPEED = 1.5
+    _GOTO_TOLERANCE = 0.3
+    _LOG_INTERVAL = 1.0
+    _FWD_LOG_INTERVAL = 0.5
+
+    # Throttle timers
+    _last_log_time = 0.0
+    _last_fwd_log_time = 0.0
+
     try:
         while not shutdown.is_set():
             detection, _ = shared_state.get_latest()
-            
+
             if detection is not None:
                 age = time.monotonic() - detection.timestamp
                 if age > config.detection_timeout_s:
                     detection = None
                 else:
                     last_detection_time = time.monotonic()
-            
+                    last_valid_detection = detection
+                    # Only update direction if detection is confident (away from center noise)
+                    if abs(detection.center_x - 0.5) > 0.05:
+                        search_direction = 1.0 if detection.center_x > 0.5 else -1.0
+
             # Check search timeout
-            if time.monotonic() - last_detection_time > config.search_timeout_s:
-                print(f"\n\n[drone] Search timeout ({config.search_timeout_s}s) exceeded - no person found.")
-                print("[drone] Initiating safety landing...")
+            time_since_detection = time.monotonic() - last_detection_time
+            if time_since_detection > config.search_timeout_s:
+                _log(f"[drone] Search timeout ({config.search_timeout_s}s) exceeded - no person found. Landing...")
                 shutdown.set()
                 break
+
+            # Detect takeoff_altitude changes and start goto
+            if config.takeoff_altitude != _prev_takeoff_alt:
+                _goto_altitude = config.takeoff_altitude
+                _log(f"[drone] Altitude changed: going to {_goto_altitude:.1f}m")
+                _prev_takeoff_alt = config.takeoff_altitude
 
             target_override = None
             if config.reference_altitude_m is not None and altitude_cache and altitude_cache.get("m") is not None:
@@ -553,14 +627,63 @@ async def live_control_loop(drone, shared_state, config, shutdown, altitude_cach
                     config.target_bbox_height,
                     altitude_cache["m"],
                 )
-            cmd = compute_velocity_command(detection, config, target_bbox_height_override=target_override)
+            cmd = compute_velocity_command(
+                detection, config,
+                target_bbox_height_override=target_override,
+                search_direction=search_direction,
+                last_detection=last_valid_detection,
+                search_active=(time_since_detection >= config.search_enter_delay_s),
+                hold_velocity=_prev_cmd,
+            )
+
+            # Override vertical velocity when going to a new altitude
+            if _goto_altitude is not None and altitude_cache.get("m") is not None:
+                alt_error = _goto_altitude - altitude_cache["m"]
+                if abs(alt_error) < _GOTO_TOLERANCE:
+                    _log(f"[drone] Reached target altitude {_goto_altitude:.1f}m")
+                    _goto_altitude = None
+                else:
+                    down_speed = max(-_GOTO_MAX_SPEED, min(_GOTO_MAX_SPEED, -_GOTO_KP * alt_error))
+                    cmd = VelocityBodyYawspeed(cmd.forward_m_s, cmd.right_m_s, down_speed, cmd.yawspeed_deg_s)
+
+            now = time.monotonic()
+
+            # Explain forward-velocity calculation in logs (throttled)
+            if now - _last_fwd_log_time >= _FWD_LOG_INTERVAL and detection is not None:
+                e = {}
+                _calculate_forward_speed(detection, config,
+                    target_override if target_override is not None else config.target_bbox_height,
+                    explain=e)
+                _log(f"[FWD] {e.get('reason', e.get('mode', '-'))} "
+                     f"target={e.get('target_bh', 0):.2f} bbox={e.get('bbox_h', 0):.2f} "
+                     f"err={e.get('height_delta', 0):+.3f} raw={e.get('raw_forward', 0):+.2f} "
+                     f"bottom={e.get('bottom_backward', 0):+.2f} final={e.get('final_forward', 0):+.2f}")
+                _last_fwd_log_time = now
+
             if drone is not None:
                 await drone.offboard.set_velocity_body(cmd)
             else:
                 tag = "TRACK" if detection is not None else "SEARCH"
-                print(f"\r[{tag}] Yaw:{cmd.yawspeed_deg_s:+6.1f}°/s  "
+                print(f"\r[{tag}] Yaw:{cmd.yawspeed_deg_s:+6.1f}\u00b0/s  "
                       f"Fwd:{cmd.forward_m_s:+5.2f}m/s  "
                       f"Down:{cmd.down_m_s:+5.2f}m/s", end="")
+            _prev_cmd = cmd
+
+            # Periodic status log to UI
+            if now - _last_log_time >= _LOG_INTERVAL:
+                _last_log_time = now
+                alt_str = f" alt={altitude_cache['m']:.1f}m" if altitude_cache and altitude_cache.get("m") is not None else ""
+                eff_str = f" eff_target={target_override:.2f}" if target_override is not None else ""
+                if detection is not None:
+                    _log(f"[TRACK] Yaw:{cmd.yawspeed_deg_s:+5.1f} Fwd:{cmd.forward_m_s:+5.2f} Down:{cmd.down_m_s:+5.2f}"
+                         f" pos=({detection.center_x:.2f},{detection.center_y:.2f}) bbox_h={detection.bbox_height:.2f}"
+                         f"{eff_str}{alt_str}")
+                elif time_since_detection < config.search_enter_delay_s:
+                    _log(f"[SEARCH-WAIT] entering search in {config.search_enter_delay_s - time_since_detection:.1f}s{alt_str}")
+                else:
+                    search_dir = "right" if cmd.yawspeed_deg_s > 0 else "left"
+                    _log(f"[SEARCH] Spinning {search_dir} at {abs(cmd.yawspeed_deg_s):.1f} deg/s{alt_str}")
+
             await asyncio.sleep(period)
     except asyncio.CancelledError:
         if drone is not None:
@@ -572,13 +695,14 @@ async def live_control_loop(drone, shared_state, config, shutdown, altitude_cach
         raise
 
 
-async def run_live_drone(args, shared_state, shutdown, shutdown_read_fd=None, takeoff_done=None, pipeline_quit_cb=None, config=None):
+async def run_live_drone(args, shared_state, shutdown, shutdown_read_fd=None, takeoff_done=None, pipeline_quit_cb=None, config=None, ui_state=None):
     """Connect to drone and run live control loop with Hailo detections.
 
     If takeoff_done is a threading.Event, it is set after takeoff and offboard start,
     so the Hailo pipeline can wait before starting.
     If pipeline_quit_cb is set, it is called at shutdown start so the pipeline stops first.
     If config is provided, use it directly (allows live mutation from web UI).
+    If ui_state is provided, logs are pushed to the web UI.
     """
     if config is None:
         config = ControllerConfig.from_args(args)
@@ -656,11 +780,9 @@ async def run_live_drone(args, shared_state, shutdown, shutdown_read_fd=None, ta
             takeoff_done.set()
 
         altitude_cache: dict = {}
-        alt_task = None
-        if drone is not None and getattr(config, 'reference_altitude_m', None) is not None:
-            alt_task = asyncio.create_task(_telemetry_altitude_task(drone, altitude_cache, shutdown))
+        alt_task = asyncio.create_task(_telemetry_altitude_task(drone, altitude_cache, shutdown))
 
-        task = asyncio.create_task(live_control_loop(drone, shared_state, config, shutdown, altitude_cache))
+        task = asyncio.create_task(live_control_loop(drone, shared_state, config, shutdown, altitude_cache, ui_state=ui_state))
         watch_task = None
         if not manage_takeoff_landing:
             watch_task = asyncio.create_task(_watch_offboard_mode(drone, shutdown))
@@ -684,12 +806,11 @@ async def run_live_drone(args, shared_state, shutdown, shutdown_read_fd=None, ta
         except asyncio.CancelledError:
             print("\n[drone] Shutdown requested, landing...")
         finally:
-            if alt_task is not None:
-                alt_task.cancel()
-                try:
-                    await alt_task
-                except asyncio.CancelledError:
-                    pass
+            alt_task.cancel()
+            try:
+                await alt_task
+            except asyncio.CancelledError:
+                pass
             if watch_task is not None:
                 watch_task.cancel()
                 try:

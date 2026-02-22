@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 
 const POLL_INTERVAL = 100; // ms
+const LOG_POLL_INTERVAL = 500; // ms
 const DEBOUNCE_MS = 250;
 
 export default function App() {
@@ -8,9 +9,13 @@ export default function App() {
   const [followingId, setFollowingId] = useState(null);
   const [videoDims, setVideoDims] = useState({ width: 0, height: 0 });
   const [controlsOpen, setControlsOpen] = useState(false);
+  const [logsOpen, setLogsOpen] = useState(false);
+  const [logs, setLogs] = useState([]);
   const [config, setConfig] = useState(null);
   const imgRef = useRef(null);
   const debounceRef = useRef(null);
+  const logSinceRef = useRef(0);
+  const logEndRef = useRef(null);
 
   // Poll detections
   useEffect(() => {
@@ -45,6 +50,43 @@ export default function App() {
       })
       .catch(() => {});
   }, []);
+
+  // Poll logs
+  useEffect(() => {
+    if (!logsOpen) return;
+    let active = true;
+    const poll = async () => {
+      while (active) {
+        try {
+          const res = await fetch(`/api/logs?since_id=${logSinceRef.current}`);
+          if (res.ok) {
+            const data = await res.json();
+            if (data.logs && data.logs.length > 0) {
+              logSinceRef.current = data.logs[data.logs.length - 1].id;
+              setLogs((prev) => {
+                const next = [...prev, ...data.logs];
+                return next.length > 200 ? next.slice(-200) : next;
+              });
+            }
+          }
+        } catch {
+          // server not ready
+        }
+        await new Promise((r) => setTimeout(r, LOG_POLL_INTERVAL));
+      }
+    };
+    poll();
+    return () => {
+      active = false;
+    };
+  }, [logsOpen]);
+
+  // Auto-scroll logs
+  useEffect(() => {
+    if (logEndRef.current) {
+      logEndRef.current.scrollIntoView({ behavior: "smooth" });
+    }
+  }, [logs]);
 
   // Track image natural dimensions
   const onImgLoad = useCallback(() => {
@@ -274,6 +316,25 @@ export default function App() {
         </div>
       )}
 
+      <div className="logs-panel">
+        <button
+          className="controls-toggle"
+          onClick={() => setLogsOpen((o) => !o)}
+        >
+          Logs {logsOpen ? "\u25B2" : "\u25BC"}
+        </button>
+        {logsOpen && (
+          <div className="logs-body">
+            {logs.map((entry) => (
+              <div key={entry.id} className="log-line">
+                {entry.msg}
+              </div>
+            ))}
+            <div ref={logEndRef} />
+          </div>
+        )}
+      </div>
+
       <div className="video-container">
         <img
           ref={imgRef}
@@ -321,7 +382,7 @@ export default function App() {
                     }}
                   >
                     {hasId ? `ID: ${det.id}` : "person"}{" "}
-                    ({Math.round(det.confidence * 100)}%)
+                    ({Math.round(det.confidence * 100)}%) h:{det.bbox.h.toFixed(2)}
                   </text>
                 </g>
               );

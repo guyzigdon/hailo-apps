@@ -251,20 +251,25 @@ def _find_track_id(person, person_by_id):
 
 def _add_drone_follow_args(parser):
     """Register drone-follow CLI flags on a pipeline parser."""
+    defaults = ControllerConfig()
     group = parser.add_argument_group("drone-follow")
     group.add_argument("--hailo-dry-run", action="store_true",
                        help="Run Hailo pipeline + connect and control simulation (Gazebo)")
     group.add_argument("--dry-run", action="store_true",
                        help="Mock detections + real drone (Gazebo)")
-    group.add_argument("--target-bbox-height", type=float, default=0.3,
+    group.add_argument("--target-bbox-height", type=float, default=defaults.target_bbox_height,
                        help="Target bbox height (0-1). When --reference-altitude is set, this is the value at that altitude.")
-    group.add_argument("--reference-altitude", type=float, default=3.0, metavar="M",
+    group.add_argument("--reference-altitude", type=float, default=defaults.reference_altitude_m, metavar="M",
                        help="Reference altitude in metres for target bbox. At this altitude we use --target-bbox-height; at other altitudes target scales inversely. Set to 0 to disable (default: 3)")
-    group.add_argument("--dead-zone-height-percent", type=float, default=5.0,
+    group.add_argument("--dead-zone-height-percent", type=float, default=defaults.dead_zone_height_percent,
                        help="Forward dead zone as %% of target bbox height (default: 5)")
-    group.add_argument("--yaw-gain", type=float, default=2.0)
-    group.add_argument("--forward-gain", type=float, default=3.0)
-    group.add_argument("--pitch-gain", type=float, default=0.08)
+    group.add_argument("--yaw-gain", dest="kp_yaw", type=float, default=defaults.kp_yaw)
+    group.add_argument("--forward-gain", dest="kp_forward", type=float, default=defaults.kp_forward)
+    group.add_argument("--backward-gain", dest="kp_backward", type=float, default=defaults.kp_backward,
+                       help="Gain for backward movement when too close (default: 5.0)")
+    group.add_argument("--bottom-backward-gain", dest="kp_backward", type=float, default=defaults.kp_backward,
+                       help="Alias for --backward-gain (uses same value for bottom-of-frame and oversize retreat)")
+    group.add_argument("--pitch-gain", dest="kp_down", type=float, default=defaults.kp_down)
     group.add_argument("--connection", default="udpin://0.0.0.0:14540",
                        help="MAVLink connection string (default: udpin://0.0.0.0:14540)")
     group.add_argument("--serial", nargs="?", const="/dev/ttyACM0", default=None,
@@ -275,18 +280,20 @@ def _add_drone_follow_args(parser):
                        help="Baud rate for serial connection (default: 57600)")
     group.add_argument("--no-takeoff-landing", action="store_true",
                        help="Do not take off or land; assume drone is already in offboard mode")
-    group.add_argument("--takeoff-altitude", type=float, default=3.0)
+    group.add_argument("--takeoff-altitude", type=float, default=defaults.takeoff_altitude)
     group.add_argument("--mission-duration", type=float, default=300.0)
-    group.add_argument("--hfov", type=float, default=66.0)
-    group.add_argument("--vfov", type=float, default=41.0)
+    group.add_argument("--hfov", type=float, default=defaults.hfov)
+    group.add_argument("--vfov", type=float, default=defaults.vfov)
     group.add_argument("--fixed-altitude", action="store_true")
     group.add_argument("--yaw-only", action="store_true",
                        help="Yaw only mode: no forward/backward or altitude movement")
-    group.add_argument("--detection-timeout", type=float, default=0.5,
+    group.add_argument("--detection-timeout", type=float, default=defaults.detection_timeout_s,
                        help="Seconds before a stale detection triggers search mode")
+    group.add_argument("--search-enter-delay", type=float, default=defaults.search_enter_delay_s,
+                       help="Seconds without detection before active search starts (default: 2.0)")
     group.add_argument("--tracking-lost-timeout", type=float, default=2.0,
                        help="Seconds to keep following a track ID after target leaves frame (looser tracking)")
-    group.add_argument("--control-loop-hz", type=float, default=10.0)
+    group.add_argument("--control-loop-hz", type=float, default=defaults.control_loop_hz)
     group.add_argument("--follow-server-port", type=int, default=8080,
                        help="HTTP server port for target selection (only with --enable-tracking)")
     
@@ -307,14 +314,16 @@ def _add_drone_follow_args(parser):
                        help="MJPEG stream frame rate (default: 10)")
 
     # Safety limits
-    group.add_argument("--max-forward", type=float, default=1.0,
-                       help="Max forward speed in m/s (default: 1.0)")
-    group.add_argument("--max-backward", type=float, default=2.0,
-                       help="Max backward speed in m/s (default: 2.0)")
-    group.add_argument("--max-bbox-height-safety", type=float, default=0.8,
+    group.add_argument("--max-forward", type=float, default=defaults.max_forward,
+                       help=f"Max forward speed in m/s (default: {defaults.max_forward})")
+    group.add_argument("--max-backward", type=float, default=defaults.max_backward,
+                       help=f"Max backward speed in m/s (default: {defaults.max_backward})")
+    group.add_argument("--max-bbox-height-safety", type=float, default=defaults.max_bbox_height_safety,
                        help="Safety limit: stop/retreat if bbox height > limit (0.0-1.0) (default: 0.8)")
-    group.add_argument("--search-timeout", type=float, default=60.0,
+    group.add_argument("--search-timeout", type=float, default=defaults.search_timeout_s,
                        help="Seconds before landing if no person is found (default: 60.0)")
+    group.add_argument("--search-vel-damp", type=float, default=defaults.search_vel_damp,
+                       help="Dampening factor for forward/backward speed during search based on last detection (default: 0.3)")
 
 
 def _resolve_serial_connection(args):
@@ -694,7 +703,7 @@ def main():
             loop.run_until_complete(
                 run_live_drone(args, shared_state, shutdown,
                               takeoff_done=takeoff_done, pipeline_quit_cb=app.loop.quit,
-                              config=controller_config))
+                              config=controller_config, ui_state=ui_state))
         except KeyboardInterrupt:
             if not shutdown.is_set():
                 shutdown.set()

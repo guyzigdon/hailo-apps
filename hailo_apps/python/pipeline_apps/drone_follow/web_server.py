@@ -21,6 +21,8 @@ Architecture:
 import json
 import os
 import threading
+import time
+from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Optional
 
@@ -34,6 +36,8 @@ class SharedUIState:
         self._following_id: Optional[int] = None
         self._frame_jpeg: Optional[bytes] = None
         self._frame_event = threading.Event()
+        self._logs: deque = deque(maxlen=200)
+        self._log_counter: int = 0
 
     def update_detections(self, detections: list, following_id: Optional[int] = None):
         """Called from app_callback with detection metadata."""
@@ -56,6 +60,22 @@ class SharedUIState:
                 "detections": list(self._detections),
                 "following_id": self._following_id,
             }
+
+    def push_log(self, message: str):
+        """Append a log message (thread-safe). Also prints to console."""
+        with self._lock:
+            self._log_counter += 1
+            self._logs.append({
+                "id": self._log_counter,
+                "ts": time.time(),
+                "msg": message,
+            })
+        print(message, flush=True)
+
+    def get_logs(self, since_id: int = 0) -> list:
+        """Return log entries with id > since_id."""
+        with self._lock:
+            return [entry for entry in self._logs if entry["id"] > since_id]
 
     def wait_frame(self, timeout: float = 1.0) -> Optional[bytes]:
         """Block until a new frame is available (for MJPEG streaming)."""
@@ -100,6 +120,8 @@ class _WebHandler(BaseHTTPRequestHandler):
             self._handle_status()
         elif self.path == "/api/config":
             self._handle_get_config()
+        elif self.path.startswith("/api/logs"):
+            self._handle_logs()
         else:
             self._handle_static()
 
@@ -173,6 +195,26 @@ class _WebHandler(BaseHTTPRequestHandler):
             return
         data = {k: getattr(cfg, k) for k in self._CONFIG_FIELDS}
         body = json.dumps(data).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self._cors_headers()
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _handle_logs(self):
+        """Return log entries newer than ?since_id=N."""
+        since_id = 0
+        if "?" in self.path:
+            query = self.path.split("?", 1)[1]
+            for part in query.split("&"):
+                if part.startswith("since_id="):
+                    try:
+                        since_id = int(part.split("=", 1)[1])
+                    except ValueError:
+                        pass
+        logs = self.ui_state.get_logs(since_id)
+        body = json.dumps({"logs": logs}).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
