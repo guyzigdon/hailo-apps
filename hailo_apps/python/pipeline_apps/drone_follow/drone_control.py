@@ -163,7 +163,7 @@ class VelocityCommandAPI:
     def __init__(self, drone, config: ControllerConfig, yaw_alpha: Optional[float] = None):
         """
         Args:
-            drone: MAVSDK System (or None for dry-run).
+            drone: MAVSDK System (or None for print-only mode).
             config: ControllerConfig used to read max_* limits.
             yaw_alpha: Low-pass filter coefficient for yaw (0..1).
                        Smaller = more smoothing, larger = faster response.
@@ -238,35 +238,24 @@ def _calculate_forward_speed(
     detection: Detection,
     config: ControllerConfig,
     target_bh: float,
-    explain: Optional[dict] = None,
 ) -> float:
     """Calculate forward/backward speed based on bbox height and bottom-of-frame position."""
     if config.yaw_only or config.kp_forward == 0:
-        if explain is not None:
-            explain.update(mode="disabled", target_bh=target_bh,
-                           bbox_h=detection.bbox_height, final_forward=0.0)
         return 0.0
 
     if detection.bbox_height > config.max_bbox_height_safety:
-        if explain is not None:
-            explain.update(mode="safety_retreat", target_bh=target_bh,
-                           bbox_h=detection.bbox_height, final_forward=-config.max_backward)
         return -config.max_backward
 
     height_delta = target_bh - detection.bbox_height
     dead_zone_height = (config.dead_zone_height_percent / 100.0) * target_bh
-    reason = "dead_zone"
 
     if abs(height_delta) < dead_zone_height:
         forward = 0.0
     elif height_delta > 0:
         forward = config.kp_forward * math.sqrt(height_delta)
-        reason = "too_small"
     else:
         forward = -config.kp_backward * math.sqrt(-height_delta)
-        reason = "too_big"
-    raw_forward = forward
-
+    
     # Bottom-of-frame backward: bbox bottom edge past threshold means drone is above and too close
     bottom_backward = 0.0
     max_y = detection.center_y + detection.bbox_height / 2
@@ -277,13 +266,6 @@ def _calculate_forward_speed(
 
     # Clamp
     forward = max(-config.max_backward, min(config.max_forward, forward))
-
-    if explain is not None:
-        explain.update(mode="normal", reason=reason, target_bh=target_bh,
-                       bbox_h=detection.bbox_height, height_delta=height_delta,
-                       dead_zone=dead_zone_height, raw_forward=raw_forward,
-                       bottom_backward=bottom_backward, final_forward=forward)
-
     return forward
 
 
@@ -366,21 +348,18 @@ def compute_velocity_command(
         if last_detection is not None:
             raw = _calculate_forward_speed(last_detection, config, target_bh)
             search_forward = raw * config.search_vel_damp
-            dead_zone = (config.dead_zone_height_percent / 100.0) * target_bh
-            if raw > 0 and (target_bh - last_detection.bbox_height) > dead_zone:
-                search_forward = max(search_forward, config.min_search_forward)
-            search_forward = min(config.max_forward, search_forward)
+            search_forward = max(search_forward, 0)
         return VelocityBodyYawspeed(search_forward, 0.0, 0.0, search_direction * config.search_yawspeed_slow)
 
     # --- Tracking mode ---
-    error_x_deg = (detection.center_x - 0.5) * config.hfov
+    error_x_deg = (detection.center_x - 0.5) * config.hfov 
     error_y_deg = (detection.center_y - 0.5) * config.vfov
 
     # Yaw: signed square-root response
     if abs(error_x_deg) < config.dead_zone_deg:
         yawspeed = 0.0
     else:
-        yawspeed = math.copysign(config.kp_yaw * math.sqrt(abs(error_x_deg)), error_x_deg)
+        yawspeed = math.copysign(config.kp_yaw * math.sqrt(abs(error_x_deg)), error_x_deg) 
     yawspeed = max(-config.max_yawspeed, min(config.max_yawspeed, yawspeed))
 
     # Altitude
@@ -456,194 +435,6 @@ class DetachedMavsdkServer:
                 self.process.wait(timeout=1)
             except subprocess.TimeoutExpired:
                 self.process.kill()
-
-
-# ---------------------------------------------------------------------------
-# Unified Simulation Engine (Dry-Run Only)
-# ---------------------------------------------------------------------------
-
-def apply_physics_step(cx, cy, bh, cmd, dt, config):
-    """Updates camera-frame position based on DRONE velocity."""
-    # Drone Yaws Right (+) -> Target moves Left (-) in frame
-    new_cx = cx - (cmd.yawspeed_deg_s * dt / config.hfov)
-    # Drone Descends (+) -> Target moves Up (-) in frame
-    new_cy = cy - (0.15 * cmd.down_m_s * dt)
-    # Drone Approaches (+) -> Target Bbox Height increases (+)
-    new_bh = bh + (0.2 * cmd.forward_m_s * dt)
-    return new_cx, new_cy, new_bh
-
-async def mock_control_loop(drone, shared_state, config, pattern, initial_x, initial_y, circle_diameter_m: float = 10.0):
-    period = 1.0 / config.control_loop_hz
-    t0 = time.monotonic()
-    circle_scale = circle_diameter_m / 10.0
-    cx, cy, bh = initial_x, initial_y, config.target_bbox_height * 0.1
-    vel_api = VelocityCommandAPI(drone, config)
-
-    try:
-        while True:
-            t = time.monotonic() - t0
-
-            shared_state.update(Detection("person", 0.99, cx, cy, bh, time.monotonic()))
-            detection, _ = shared_state.get_latest()
-
-            cmd = compute_velocity_command(detection, config)
-            cmd = await vel_api.send(cmd)
-
-            # Apply world movement (the person walking)
-            dx, dy, dbh = 0.0, 0.0, 0.0
-            if pattern == "circle":
-                dx = 0.02 * circle_scale * math.cos(2 * math.pi * t / 10.0)   # Horizontal drift
-                dbh = 0.008 * circle_scale * math.sin(2 * math.pi * t / 10.0)  # Distance drift
-            elif pattern == "line":
-                dbh = -0.005  # Walking straight away
-            elif pattern == "sweep":
-                dx = 0.03 * math.sin(2 * math.pi * t / 5.0)
-
-            # 4. Reaction Step: Apply Drone Movement + World Drift
-            cx, cy, bh = apply_physics_step(cx, cy, bh, cmd, period, config)
-            cx += dx
-            cy += dy
-            bh += dbh
-
-            # Bounds checks
-            cx, cy = max(0.01, min(0.99, cx)), max(0.01, min(0.99, cy))
-            bh = max(0.02, min(0.95, bh))
-
-            print(f"\r[SIM] Pos:({cx:.2f}, {cy:.2f}) H:{bh:.2f} | CMD Yaw:{cmd.yawspeed_deg_s:+5.1f} Fwd:{cmd.forward_m_s:+4.1f}", end="")
-            await asyncio.sleep(period)
-    except asyncio.CancelledError:
-        try:
-            await vel_api.send_zero()
-        except Exception:
-            pass  # connection may already be gone; main finally will do stop/land
-        raise
-
-# ---------------------------------------------------------------------------
-# Dry-Run Drone Runner
-# ---------------------------------------------------------------------------
-
-async def run_drone(
-    args,
-    shared_state,
-    shutdown: asyncio.Event,
-    shutdown_read_fd: Optional[int] = None,
-):
-    config = ControllerConfig.from_args(args)
-
-    # If we have a pipe from parent, Ctrl+C is handled by parent; we shutdown when pipe is written
-    if shutdown_read_fd is not None:
-        loop = asyncio.get_running_loop()
-        def _on_shutdown_pipe():
-            try:
-                os.read(shutdown_read_fd, 1)
-            except (OSError, BlockingIOError):
-                pass
-            try:
-                loop.remove_reader(shutdown_read_fd)
-            except (OSError, ValueError):
-                pass
-            shutdown.set()
-        loop.add_reader(shutdown_read_fd, _on_shutdown_pipe)
-
-    mavsdk_server = DetachedMavsdkServer(args.connection)
-    connection_url = mavsdk_server.__enter__()
-    try:
-        drone = System()
-        await drone.connect(system_address=connection_url)
-
-        manage_takeoff_landing = not getattr(args, 'no_takeoff_landing', False)
-        if manage_takeoff_landing:
-            print("[drone] Connecting and taking off...")
-        else:
-            print("[drone] Connecting (drone must already be in OFFBOARD)...")
-        async for state in drone.core.connection_state():
-            if state.is_connected:
-                break
-
-        if manage_takeoff_landing:
-            await drone.action.set_takeoff_altitude(args.takeoff_altitude)
-            await drone.action.arm()
-            await drone.action.takeoff()
-            await asyncio.sleep(8)
-        else:
-            await _require_offboard_mode(drone)
-
-        # PX4 requires setpoints to be streamed before offboard.start() (NO_SETPOINT_SET otherwise).
-        vel_api = VelocityCommandAPI(drone, config)
-        setpoint_period_s = 0.05
-        setpoint_duration_s = 1.5
-        deadline = asyncio.get_event_loop().time() + setpoint_duration_s
-        while asyncio.get_event_loop().time() < deadline and not shutdown.is_set():
-            await vel_api.send_raw(VelocityBodyYawspeed(0.0, 0.0, 0.0, 0.0))
-            await asyncio.sleep(setpoint_period_s)
-        if shutdown.is_set():
-            return
-        await drone.offboard.start()
-        offboard_started = True
-        # When not manage_takeoff_landing we do not call offboard.stop() on exit (don't change mode)
-
-        task = asyncio.create_task(
-            mock_control_loop(drone, shared_state, config, args.mock_pattern, args.mock_x, args.mock_y, args.mock_circle_diameter)
-        )
-        watch_task = None
-        if not manage_takeoff_landing:
-            watch_task = asyncio.create_task(_watch_offboard_mode(drone, shutdown))
-
-        try:
-            # Wait for mission duration or Ctrl+C (shutdown event)
-            done, pending = await asyncio.wait(
-                [
-                    asyncio.create_task(shutdown.wait()),
-                    asyncio.create_task(asyncio.sleep(args.mission_duration)),
-                ],
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            for t in pending:
-                t.cancel()
-                try:
-                    await t
-                except asyncio.CancelledError:
-                    pass
-            if shutdown.is_set():
-                print("\n[drone] Shutdown requested, landing...")
-        except asyncio.CancelledError:
-            print("\n[drone] Shutdown requested, landing...")
-        finally:
-            if watch_task is not None:
-                watch_task.cancel()
-                try:
-                    await watch_task
-                except asyncio.CancelledError:
-                    pass
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
-            except Exception:
-                pass
-            if offboard_started and drone is not None and manage_takeoff_landing:
-                try:
-                    await vel_api.send_zero()
-                    await drone.offboard.stop()
-                except OffboardError as e:
-                    print(f"[drone] Offboard stop: {e._result.result}")
-                except Exception as e:
-                    _print_connection_error("[drone] Offboard stop", e)
-                print("[drone] Landing safely - please wait (ignoring further Ctrl+C until done)...")
-                try:
-                    _ignore_sigint_during_landing(ignore=True)
-                    print("[drone] Landing...")
-                    try:
-                        await drone.action.land()
-                        await asyncio.sleep(8)
-                    except Exception as e:
-                        _print_connection_error("[drone] Land", e, hint=True)
-                finally:
-                    _ignore_sigint_during_landing(ignore=False)
-        print("[drone] Done.")
-    finally:
-        mavsdk_server.__exit__(None, None, None)
 
 
 def _exit_if_not_offboard(reason: str) -> None:
@@ -736,7 +527,6 @@ async def live_control_loop(drone, shared_state, config, shutdown, altitude_cach
     """Control loop for Hailo modes.
 
     Reads detections from shared_state, computes velocity commands.
-    If drone is None (hailo-dry-run), prints commands instead.
     When config.reference_altitude_m is set and altitude_cache is provided, target bbox height is scaled by altitude.
     If ui_state is provided, logs are also pushed to the web UI.
     """

@@ -3,13 +3,11 @@
 import time
 
 import pytest
-from mavsdk.offboard import VelocityBodyYawspeed
 
 from drone_control import (
     Detection,
     ControllerConfig,
     compute_velocity_command,
-    apply_physics_step,
 )
 
 
@@ -32,7 +30,7 @@ def config():
 class TestSearchMode:
     def test_no_detection_returns_search_yaw(self, config):
         cmd = compute_velocity_command(None, config)
-        assert cmd.yawspeed_deg_s == config.search_yawspeed
+        assert cmd.yawspeed_deg_s == config.search_yawspeed_slow
 
     def test_no_detection_zero_velocity(self, config):
         cmd = compute_velocity_command(None, config)
@@ -222,45 +220,3 @@ class TestCombined:
         assert abs(cmd_high.forward_m_s / cmd_low.forward_m_s - 2.0) < 0.01
 
 
-# ---- Physics step: apply_physics_step (drone velocity -> camera-frame update) ----
-
-class TestApplyPhysicsStep:
-    """After a velocity command, camera-frame position updates (same logic as mock_control_loop)."""
-
-    @pytest.fixture
-    def step_config(self):
-        return ControllerConfig(hfov=66.0, vfov=41.0)
-
-    def test_yaw_right_moves_target_left(self, step_config):
-        """Positive yawspeed (turn right) -> target moves left in frame (cx decreases)."""
-        cx, cy, bh = 0.7, 0.5, 0.3
-        cmd = VelocityBodyYawspeed(0.0, 0.0, 0.0, 30.0)
-        dt = 0.1
-        new_cx, new_cy, new_bh = apply_physics_step(cx, cy, bh, cmd, dt, step_config)
-        assert new_cx < cx
-        assert new_cy == cy
-        assert new_bh == bh
-
-    def test_yaw_left_moves_target_right(self, step_config):
-        """Negative yawspeed (turn left) -> target moves right in frame (cx increases)."""
-        cx, cy, bh = 0.3, 0.5, 0.3
-        cmd = VelocityBodyYawspeed(0.0, 0.0, 0.0, -20.0)
-        dt = 0.1
-        new_cx, new_cy, new_bh = apply_physics_step(cx, cy, bh, cmd, dt, step_config)
-        assert new_cx > cx
-
-    def test_forward_increases_bbox_height(self, step_config):
-        """Forward (approach) -> bbox height increases."""
-        cx, cy, bh = 0.5, 0.5, 0.2
-        cmd = VelocityBodyYawspeed(1.0, 0.0, 0.0, 0.0)
-        dt = 0.1
-        new_cx, new_cy, new_bh = apply_physics_step(cx, cy, bh, cmd, dt, step_config)
-        assert new_bh > bh
-
-    def test_down_moves_target_up_in_frame(self, step_config):
-        """Drone descends -> target moves up in frame (cy decreases)."""
-        cx, cy, bh = 0.5, 0.5, 0.3
-        cmd = VelocityBodyYawspeed(0.0, 0.0, 1.0, 0.0)
-        dt = 0.1
-        new_cx, new_cy, new_bh = apply_physics_step(cx, cy, bh, cmd, dt, step_config)
-        assert new_cy < cy

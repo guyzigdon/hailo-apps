@@ -9,7 +9,6 @@ from .drone_control import (
     SharedDetectionState,
     ControllerConfig,
     compute_velocity_command,
-    apply_physics_step,
 )
 from .drone_follow import (
     app_callback,
@@ -22,7 +21,6 @@ __all__ = [
     "SharedDetectionState",
     "ControllerConfig",
     "compute_velocity_command",
-    "apply_physics_step",
     "app_callback",
     "create_app",
     "SharedUIState",

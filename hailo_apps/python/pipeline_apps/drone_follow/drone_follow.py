@@ -2,20 +2,7 @@
 """
 Drone Follow — a Hailo pipeline app that follows a person with a drone.
 
-Three modes:
-    --dry-run:       Mock detections + drone (Gazebo). No Hailo needed.
-    --hailo-dry-run: Real Hailo detection + connect and control simulation (Gazebo).
-    Default (live):  Real Hailo detection + real drone.
-
-Dry-run patterns (--mock-pattern):
-    static: Person stands still at a specific (x, y) coordinate.
-    circle: Person walks in a large 3D circle (changes angle and distance).
-    line:   Person walks in a straight line away from the drone.
-    sweep:  Person paces back and forth (testing yaw).
-
 Usage:
-    python drone_follow.py --dry-run --mock-pattern circle
-    python drone_follow.py --hailo-dry-run --input /path/to/video.mp4 --input-codec h264
     python drone_follow.py --input rpi  # live mode with camera + drone
 
 Pipeline options (--input, --input-codec, etc.) are passed through to the tiling pipeline.
@@ -32,12 +19,12 @@ import numpy as np
 
 try:
     from drone_control import (
-        ControllerConfig, Detection, SharedDetectionState, run_drone, run_live_drone
+        ControllerConfig, Detection, SharedDetectionState, run_live_drone
     )
     from follow_server import FollowServer, FollowTargetState
 except ImportError:
     from .drone_control import (
-        ControllerConfig, Detection, SharedDetectionState, run_drone, run_live_drone
+        ControllerConfig, Detection, SharedDetectionState, run_live_drone
     )
     from .follow_server import FollowServer, FollowTargetState
 
@@ -253,29 +240,22 @@ def _add_drone_follow_args(parser):
     """Register drone-follow CLI flags on a pipeline parser."""
     defaults = ControllerConfig()
     group = parser.add_argument_group("drone-follow")
-    group.add_argument("--hailo-dry-run", action="store_true",
-                       help="Run Hailo pipeline + connect and control simulation (Gazebo)")
-    group.add_argument("--dry-run", action="store_true",
-                       help="Mock detections + real drone (Gazebo)")
     group.add_argument("--target-bbox-height", type=float, default=defaults.target_bbox_height,
-                       help="Target bbox height (0-1). When --reference-altitude is set, this is the value at that altitude.")
+                       help="Target bbox height (0-1).")
     group.add_argument("--target-distance", type=float, default=defaults.target_distance_m, metavar="M",
                        help="Desired horizontal distance to person in metres. Overrides --target-bbox-height "
                             "by computing the expected bbox height from altitude + distance geometry.")
     group.add_argument("--person-height", type=float, default=defaults.person_height_m, metavar="M",
                        help=f"Assumed person height for distance calculation (default: {defaults.person_height_m}m)")
-    group.add_argument("--reference-altitude", type=float, default=defaults.reference_altitude_m, metavar="M",
-                       help="Reference altitude in metres for target bbox. At this altitude we use --target-bbox-height; "
-                            "at other altitudes target scales inversely. Ignored when --target-distance is set. (default: 3)")
     group.add_argument("--dead-zone-height-percent", type=float, default=defaults.dead_zone_height_percent,
                        help="Forward dead zone as %% of target bbox height (default: 5)")
     group.add_argument("--yaw-gain", dest="kp_yaw", type=float, default=defaults.kp_yaw)
     group.add_argument("--forward-gain", dest="kp_forward", type=float, default=defaults.kp_forward)
     group.add_argument("--backward-gain", dest="kp_backward", type=float, default=defaults.kp_backward,
                        help="Gain for backward movement when too close (default: 5.0)")
-    group.add_argument("--bottom-backward-gain", dest="kp_backward", type=float, default=defaults.kp_backward,
-                       help="Alias for --backward-gain (uses same value for bottom-of-frame and oversize retreat)")
     group.add_argument("--pitch-gain", dest="kp_down", type=float, default=defaults.kp_down)
+    
+    # Connectivity
     group.add_argument("--connection", default="udpin://0.0.0.0:14540",
                        help="MAVLink connection string (default: udpin://0.0.0.0:14540)")
     group.add_argument("--serial", nargs="?", const="/dev/ttyACM0", default=None,
@@ -283,39 +263,9 @@ def _add_drone_follow_args(parser):
                        help="Connect to CubeOrange via serial cable instead of UDP. "
                             "Optionally specify device path (default: /dev/ttyACM0)")
     group.add_argument("--serial-baud", type=int, default=57600,
-                       help="Baud rate for serial connection (default: 57600)")
-    group.add_argument("--no-takeoff-landing", action="store_true",
-                       help="Do not take off or land; assume drone is already in offboard mode")
-    group.add_argument("--takeoff-altitude", type=float, default=defaults.takeoff_altitude)
-    group.add_argument("--mission-duration", type=float, default=300.0)
-    group.add_argument("--hfov", type=float, default=defaults.hfov)
-    group.add_argument("--vfov", type=float, default=defaults.vfov)
-    group.add_argument("--fixed-altitude", action="store_true")
-    group.add_argument("--yaw-only", action="store_true",
-                       help="Yaw only mode: no forward/backward or altitude movement")
-    group.add_argument("--detection-timeout", type=float, default=defaults.detection_timeout_s,
-                       help="Seconds before a stale detection triggers search mode")
-    group.add_argument("--search-enter-delay", type=float, default=defaults.search_enter_delay_s,
-                       help="Seconds without detection before active search starts (default: 2.0)")
-    group.add_argument("--tracking-lost-timeout", type=float, default=2.0,
-                       help="Seconds to keep following a track ID after target leaves frame (looser tracking)")
-    group.add_argument("--control-loop-hz", type=float, default=defaults.control_loop_hz)
-    group.add_argument("--smooth-forward", action=argparse.BooleanOptionalAction, default=defaults.smooth_forward,
-                       help=f"Enable/disable forward velocity smoothing (default: {defaults.smooth_forward})")
-    group.add_argument("--forward-alpha", type=float, default=defaults.forward_alpha,
-                       help=f"EMA smoothing factor for forward velocity (0=sluggish, 1=no smoothing, default: {defaults.forward_alpha})")
-    group.add_argument("--kd-forward", type=float, default=defaults.kd_forward,
-                       help=f"Derivative gain: anticipate person approach/recede (default: {defaults.kd_forward})")
+                       help="Baud rate for serial connection (default: 57600)")    
     group.add_argument("--follow-server-port", type=int, default=8080,
                        help="HTTP server port for target selection (only with --enable-tracking)")
-    
-    # Dry run specific
-    group.add_argument("--mock-pattern", default="static",
-                        choices=["static", "circle", "line", "sweep"])
-    group.add_argument("--mock-x", type=float, default=0.7)
-    group.add_argument("--mock-y", type=float, default=0.5)
-    group.add_argument("--mock-circle-diameter", type=float, default=10.0, metavar="M",
-                        help="Circle pattern diameter in meters (default: 10)")
 
     # UI options
     group.add_argument("--ui", action="store_true",
@@ -325,6 +275,29 @@ def _add_drone_follow_args(parser):
     group.add_argument("--ui-fps", type=int, default=10,
                        help="MJPEG stream frame rate (default: 10)")
 
+    
+    group.add_argument("--no-takeoff-landing", action="store_true",
+                       help="Do not take off or land; assume drone is already in offboard mode")
+    group.add_argument("--takeoff-altitude", type=float, default=defaults.takeoff_altitude)
+    group.add_argument("--mission-duration", type=float, default=300.0)
+    group.add_argument("--hfov", type=float, default=defaults.hfov)
+    group.add_argument("--vfov", type=float, default=defaults.vfov)
+    group.add_argument("--fixed-altitude", action="store_true")
+    group.add_argument("--yaw-only", action="store_true",
+                       help="Yaw only mode: no forward/backward or altitude movement")
+    group.add_argument("--search-enter-delay", type=float, default=defaults.search_enter_delay_s,
+                       help="Seconds without detection before active search starts (default: 2.0)")
+    group.add_argument("--tracking-lost-timeout", type=float, default=2.0,
+                       help="Seconds to keep following a track ID after target leaves frame (looser tracking)")
+    
+    
+    group.add_argument("--control-loop-hz", type=float, default=defaults.control_loop_hz)
+    
+    # Smoothing
+    group.add_argument("--smooth-forward", action=argparse.BooleanOptionalAction, default=defaults.smooth_forward,
+                       help=f"Enable/disable forward velocity smoothing (default: {defaults.smooth_forward})")
+    group.add_argument("--forward-alpha", type=float, default=defaults.forward_alpha,
+                       help=f"EMA smoothing factor for forward velocity (0=sluggish, 1=no smoothing, default: {defaults.forward_alpha})")
     # Safety limits
     group.add_argument("--max-forward", type=float, default=defaults.max_forward,
                        help=f"Max forward speed in m/s (default: {defaults.max_forward})")
@@ -332,11 +305,13 @@ def _add_drone_follow_args(parser):
                        help=f"Max backward speed in m/s (default: {defaults.max_backward})")
     group.add_argument("--max-bbox-height-safety", type=float, default=defaults.max_bbox_height_safety,
                        help="Safety limit: stop/retreat if bbox height > limit (0.0-1.0) (default: 0.8)")
-    group.add_argument("--search-timeout", type=float, default=defaults.search_timeout_s,
-                       help="Seconds before landing if no person is found (default: 60.0)")
+
     group.add_argument("--search-vel-damp", type=float, default=defaults.search_vel_damp,
                        help="Dampening factor for forward/backward speed during search based on last detection (default: 0.3)")
-
+    # For future use, currently not used
+    group.add_argument("--search-timeout", type=float, default=defaults.search_timeout_s,
+                       help="Seconds before landing if no person is found (default: 60.0)") 
+    
 
 def _resolve_serial_connection(args):
     """If --serial is given, override --connection with a serial:// URI."""
@@ -545,186 +520,108 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
 # ---------------------------------------------------------------------------
 
 def main():
-    # Pre-parse to determine mode before full arg parsing
-    pre_parser = argparse.ArgumentParser(add_help=False)
-    pre_parser.add_argument("--dry-run", action="store_true")
-    pre_args, _ = pre_parser.parse_known_args()
+    shared_state = SharedDetectionState()
+    shutdown = asyncio.Event()
+    eos_reached = threading.Event()
 
-    if pre_args.dry_run:
-        # === DRY-RUN MODE (mock detections + real drone) ===
-        parser = argparse.ArgumentParser()
-        _add_drone_follow_args(parser)
-        args = parser.parse_args()
-        _resolve_serial_connection(args)
+    # Create target state for follow server
+    target_state = FollowTargetState()
 
-        # Start follow server (won't do much in mock mode but available for consistency)
-        target_state = FollowTargetState()
-        shared_state_for_dry_run = SharedDetectionState()
-        follow_server = FollowServer(target_state, shared_state_for_dry_run, port=args.follow_server_port)
-        follow_server.start()
+    # Pre-parse --ui flag to set up web UI before create_app parses all args
+    ui_pre = argparse.ArgumentParser(add_help=False)
+    ui_pre.add_argument("--ui", action="store_true")
+    ui_pre.add_argument("--ui-port", type=int, default=5001)
+    ui_pre.add_argument("--ui-fps", type=int, default=10)
+    ui_pre.add_argument("--enable-tracking", action="store_true")
+    ui_pre_args, _ = ui_pre.parse_known_args()
 
+    ui_state = None
+    web_server = None
+    if ui_pre_args.ui:
         try:
-            if hasattr(os, "fork") and os.name != "nt":
-                r, w = os.pipe()
-                pid = os.fork()
-                if pid == 0:
-                    os.close(w)
-                    try:
-                        os.setsid()
-                        shutdown = asyncio.Event()
-                        asyncio.run(run_drone(args, shared_state_for_dry_run, shutdown,
-                                             shutdown_read_fd=r))
-                    finally:
-                        os.close(r)
-                    os._exit(0)
-                os.close(r)
-                def on_signal(*_args):
-                    print("\n[drone] Ctrl+C received, shutting down...")
-                    try:
-                        os.write(w, b"x")
-                    except OSError:
-                        pass
-                    try:
-                        os.close(w)
-                    except OSError:
-                        pass
-                signal.signal(signal.SIGINT, on_signal)
-                if hasattr(signal, "SIGTERM"):
-                    signal.signal(signal.SIGTERM, on_signal)
-                try:
-                    os.waitpid(pid, 0)
-                except OSError:
-                    pass
-            else:
-                shutdown = asyncio.Event()
-                def on_signal(*_args):
-                    if not shutdown.is_set():
-                        shutdown.set()
-                        print("\n[drone] Ctrl+C received, shutting down...")
-                try:
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-                    try:
-                        for sig in (signal.SIGINT, signal.SIGTERM):
-                            loop.add_signal_handler(sig, on_signal)
-                    except NotImplementedError:
-                        signal.signal(signal.SIGINT, on_signal)
-                        if hasattr(signal, "SIGTERM"):
-                            signal.signal(signal.SIGTERM, on_signal)
-                    loop.run_until_complete(run_drone(args, shared_state_for_dry_run, shutdown))
-                except KeyboardInterrupt:
-                    if not shutdown.is_set():
-                        shutdown.set()
-                    print("\n[drone] Shutdown.")
-        finally:
-            follow_server.stop()
+            from web_server import WebServer, SharedUIState
+        except ImportError:
+            from .web_server import WebServer, SharedUIState
+        ui_state = SharedUIState()
+        # Check that the UI has been built
+        _ui_build_index = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "ui", "build", "index.html")
+        if not os.path.isfile(_ui_build_index):
+            print("ERROR: Web UI has not been built yet.")
+            print("  cd hailo_apps/python/pipeline_apps/drone_follow/ui")
+            print("  npm install")
+            print("  npm run build")
+            raise SystemExit(1)
+        # Auto-enable tracking for UI (stable IDs needed for click-to-follow)
+        if not ui_pre_args.enable_tracking:
+            import sys as _sys
+            _sys.argv.append("--enable-tracking")
+            print("[ui] Auto-enabling tracking for UI mode")
 
-    else:
-        # === HAILO MODES (structured as a hailo-app) ===
-        # Hailo-app pattern: create shared state, build app, run pipeline
-        shared_state = SharedDetectionState()
-        shutdown = asyncio.Event()
-        eos_reached = threading.Event()
+    app = create_app(shared_state, target_state=target_state, eos_reached=eos_reached,
+                     ui_state=ui_state, ui_fps=ui_pre_args.ui_fps)
+    args = app.options_menu
+    _resolve_serial_connection(args)
 
-        # Create target state for follow server
-        target_state = FollowTargetState()
+    # Create controller config once so it can be shared (and mutated via web UI)
+    controller_config = ControllerConfig.from_args(args)
 
-        # Pre-parse --ui flag to set up web UI before create_app parses all args
-        ui_pre = argparse.ArgumentParser(add_help=False)
-        ui_pre.add_argument("--ui", action="store_true")
-        ui_pre.add_argument("--ui-port", type=int, default=5001)
-        ui_pre.add_argument("--ui-fps", type=int, default=10)
-        ui_pre.add_argument("--enable-tracking", action="store_true")
-        ui_pre_args, _ = ui_pre.parse_known_args()
+    # Start follow server (always available)
+    follow_server = FollowServer(target_state, shared_state, port=args.follow_server_port)
+    follow_server.start()
 
-        ui_state = None
-        web_server = None
-        if ui_pre_args.ui:
-            try:
-                from web_server import WebServer, SharedUIState
-            except ImportError:
-                from .web_server import WebServer, SharedUIState
-            ui_state = SharedUIState()
-            # Check that the UI has been built
-            _ui_build_index = os.path.join(
-                os.path.dirname(os.path.abspath(__file__)), "ui", "build", "index.html")
-            if not os.path.isfile(_ui_build_index):
-                print("ERROR: Web UI has not been built yet.")
-                print("  cd hailo_apps/python/pipeline_apps/drone_follow/ui")
-                print("  npm install")
-                print("  npm run build")
-                raise SystemExit(1)
-            # Auto-enable tracking for UI (stable IDs needed for click-to-follow)
-            if not ui_pre_args.enable_tracking:
-                import sys as _sys
-                _sys.argv.append("--enable-tracking")
-                print("[ui] Auto-enabling tracking for UI mode")
+    # Start web UI server
+    if ui_state is not None:
+        static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ui", "build")
+        web_server = WebServer(ui_state, target_state, shared_state,
+                               controller_config=controller_config,
+                               port=args.ui_port, static_dir=static_dir)
+        web_server.start()
 
-        app = create_app(shared_state, target_state=target_state, eos_reached=eos_reached,
-                         ui_state=ui_state, ui_fps=ui_pre_args.ui_fps)
-        args = app.options_menu
-        _resolve_serial_connection(args)
+    takeoff_done = threading.Event()
 
-        # Create controller config once so it can be shared (and mutated via web UI)
-        controller_config = ControllerConfig.from_args(args)
+    def _eos_to_shutdown():
+        eos_reached.wait()
+        shutdown.set()
+    threading.Thread(target=_eos_to_shutdown, daemon=True).start()
 
-        # Start follow server (always available)
-        follow_server = FollowServer(target_state, shared_state, port=args.follow_server_port)
-        follow_server.start()
+    # Run pipeline in thread; start only after takeoff (non-daemon so we can join on exit)
+    def run_pipeline():
+        takeoff_done.wait()
+        try:
+            app.run()
+        except SystemExit:
+            pass
+    pipeline_thread = threading.Thread(target=run_pipeline, daemon=False)
+    pipeline_thread.start()
 
-        # Start web UI server
-        if ui_state is not None:
-            static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ui", "build")
-            web_server = WebServer(ui_state, target_state, shared_state,
-                                   controller_config=controller_config,
-                                   port=args.ui_port, static_dir=static_dir)
-            web_server.start()
-
-        takeoff_done = threading.Event()
-
-        def _eos_to_shutdown():
-            eos_reached.wait()
+    def on_signal(*_):
+        if not shutdown.is_set():
             shutdown.set()
-        threading.Thread(target=_eos_to_shutdown, daemon=True).start()
-
-        # Run pipeline in thread; start only after takeoff (non-daemon so we can join on exit)
-        def run_pipeline():
-            takeoff_done.wait()
-            try:
-                app.run()
-            except SystemExit:
-                pass
-        pipeline_thread = threading.Thread(target=run_pipeline, daemon=False)
-        pipeline_thread.start()
-
-        # --- HAILO-DRY-RUN or LIVE: Hailo detections + connect and control drone (sim or real) ---
-        def on_signal(*_):
-            if not shutdown.is_set():
-                shutdown.set()
-                print("\n[drone] Ctrl+C received, shutting down...")
+            print("\n[drone] Ctrl+C received, shutting down...")
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
         try:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            try:
-                for sig in (signal.SIGINT, signal.SIGTERM):
-                    loop.add_signal_handler(sig, on_signal)
-            except NotImplementedError:
-                signal.signal(signal.SIGINT, on_signal)
-                if hasattr(signal, "SIGTERM"):
-                    signal.signal(signal.SIGTERM, on_signal)
-            loop.run_until_complete(
-                run_live_drone(args, shared_state, shutdown,
-                              takeoff_done=takeoff_done, pipeline_quit_cb=app.loop.quit,
-                              config=controller_config, ui_state=ui_state))
-        except KeyboardInterrupt:
-            if not shutdown.is_set():
-                shutdown.set()
-            print("\n[drone] Shutdown.")
-        finally:
-            if web_server is not None:
-                web_server.stop()
-            follow_server.stop()
-            pipeline_thread.join(timeout=5.0)
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                loop.add_signal_handler(sig, on_signal)
+        except NotImplementedError:
+            signal.signal(signal.SIGINT, on_signal)
+            if hasattr(signal, "SIGTERM"):
+                signal.signal(signal.SIGTERM, on_signal)
+        loop.run_until_complete(
+            run_live_drone(args, shared_state, shutdown,
+                          takeoff_done=takeoff_done, pipeline_quit_cb=app.loop.quit,
+                          config=controller_config, ui_state=ui_state))
+    except KeyboardInterrupt:
+        if not shutdown.is_set():
+            shutdown.set()
+        print("\n[drone] Shutdown.")
+    finally:
+        if web_server is not None:
+            web_server.stop()
+        follow_server.stop()
+        pipeline_thread.join(timeout=5.0)
 
 
 if __name__ == "__main__":
