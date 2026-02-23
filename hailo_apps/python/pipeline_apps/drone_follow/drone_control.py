@@ -627,8 +627,7 @@ async def live_control_loop(drone, shared_state, config, shutdown, altitude_cach
                 hold_velocity=_prev_cmd,
             )
 
-            # Apply forward smoothing: estimate person velocity + EMA
-            if config.smooth_forward:
+            if config.smooth_forward and not config.yaw_only:
                 smoothed_fwd = _fwd_smoother.update(detection, cmd.forward_m_s, config)
                 cmd = VelocityBodyYawspeed(smoothed_fwd, cmd.right_m_s, cmd.down_m_s, cmd.yawspeed_deg_s)
 
