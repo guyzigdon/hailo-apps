@@ -100,6 +100,17 @@ class ControllerConfig:
     takeoff_altitude: float = 3.0
     log_verbosity: str = "normal"  # quiet | normal | debug
 
+    def __post_init__(self):
+        self.validate()
+
+    def validate(self):
+        """Raise ValueError if the configuration is internally inconsistent."""
+        if self.target_distance_m is not None and not self.fixed_altitude:
+            raise ValueError(
+                "target_distance_m requires fixed_altitude=True; "
+                "with variable altitude, use target_bbox_height instead"
+            )
+
     @classmethod
     def from_args(cls, args):
         # Single source of defaults: dataclass values.
@@ -120,6 +131,21 @@ class ControllerConfig:
         ref_alt = _arg("reference_altitude", "reference_altitude_m", default=defaults.reference_altitude_m)
         ref_alt = ref_alt if ref_alt and ref_alt > 0 else defaults.reference_altitude_m
 
+        # --target-distance and --target-bbox-height are mutually exclusive.
+        # Argparse defaults are None so we can detect user-explicit values.
+        _user_distance = getattr(args, "target_distance", None)
+        _user_bbox = getattr(args, "target_bbox_height", None)
+        if _user_distance is not None and _user_bbox is not None:
+            raise ValueError(
+                "--target-distance and --target-bbox-height are mutually exclusive"
+            )
+        # If user explicitly chose bbox-height mode, disable distance mode.
+        if _user_bbox is not None and _user_distance is None:
+            target_distance_val = None
+        else:
+            target_distance_val = _arg("target_distance", "target_distance_m",
+                                       default=defaults.target_distance_m)
+
         return cls(
             hfov=_arg("hfov", default=defaults.hfov),
             vfov=_arg("vfov", default=defaults.vfov),
@@ -128,7 +154,7 @@ class ControllerConfig:
             kp_forward=float(_arg("kp_forward", "forward_gain", default=defaults.kp_forward)),
             kp_backward=_arg("kp_backward", "backward_gain", default=defaults.kp_backward),
             target_bbox_height=_arg("target_bbox_height", default=defaults.target_bbox_height),
-            target_distance_m=_arg("target_distance", "target_distance_m", default=defaults.target_distance_m),
+            target_distance_m=target_distance_val,
             person_height_m=_arg("person_height", "person_height_m", default=defaults.person_height_m),
             dead_zone_height_percent=_arg("dead_zone_height_percent", default=defaults.dead_zone_height_percent),
             reference_altitude_m=ref_alt,
@@ -303,8 +329,7 @@ class ForwardSmoother:
         if detection is not None:
             self._prev_bbox_h = detection.bbox_height
             self._prev_time = now
-        elif detection is None:
-            # Lost detection: decay rate toward zero
+        else:
             self._bbox_h_rate *= 0.9
 
         # Derivative feed-forward: positive rate means person is getting closer (bbox growing)
@@ -539,10 +564,9 @@ async def live_control_loop(drone, shared_state, config, shutdown, altitude_cach
     def _log(msg: str, level: int = logging.INFO):
         if not LOGGER.isEnabledFor(level):
             return
+        LOGGER.log(level, msg)
         if ui_state is not None:
             ui_state.push_log(msg)
-        else:
-            LOGGER.log(level, msg)
 
     period = 1.0 / max(0.1, min(config.control_loop_hz, 5.0))
     last_detection_time = time.monotonic()
@@ -662,7 +686,70 @@ async def live_control_loop(drone, shared_state, config, shutdown, altitude_cach
         raise
 
 
-async def run_live_drone(args, shared_state, shutdown, shutdown_read_fd=None, takeoff_done=None, pipeline_quit_cb=None, config=None, ui_state=None):
+async def _start_offboard(drone, vel_api: VelocityCommandAPI, shutdown: asyncio.Event) -> None:
+    """Stream zero setpoints then start offboard mode with retries.
+
+    PX4 requires setpoints to be streamed before offboard.start()
+    (NO_SETPOINT_SET otherwise). Streams at ~20 Hz for 2 s, then
+    retries offboard.start() up to 3 times.
+    """
+    zero = VelocityBodyYawspeed(0.0, 0.0, 0.0, 0.0)
+    setpoint_period_s = 0.05
+
+    for _ in range(int(2.0 / setpoint_period_s)):
+        if shutdown.is_set():
+            return
+        await vel_api.send_raw(zero)
+        await asyncio.sleep(setpoint_period_s)
+
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            await drone.offboard.start()
+            return
+        except OffboardError as e:
+            if attempt == max_retries - 1:
+                raise
+            LOGGER.warning("[drone] Failed to start offboard (%s), retrying...", e)
+            for _ in range(int(1.0 / setpoint_period_s)):
+                if shutdown.is_set():
+                    return
+                await vel_api.send_raw(zero)
+                await asyncio.sleep(setpoint_period_s)
+
+
+async def _land_safely(drone, vel_api: VelocityCommandAPI) -> None:
+    """Stop offboard mode and land, ignoring SIGINT during the sequence."""
+    try:
+        await vel_api.send_zero()
+        await drone.offboard.stop()
+    except (OffboardError, Exception) as e:
+        _print_connection_error("[drone] Offboard stop", e)
+
+    LOGGER.warning("[drone] Landing safely - please wait (ignoring further Ctrl+C until done)...")
+    try:
+        _ignore_sigint_during_landing(ignore=True)
+        LOGGER.info("[drone] Landing...")
+        try:
+            await drone.action.land()
+            await asyncio.sleep(8)
+        except Exception as e:
+            _print_connection_error("[drone] Land", e)
+    finally:
+        _ignore_sigint_during_landing(ignore=False)
+
+
+async def _cancel_task(task: asyncio.Task) -> None:
+    """Cancel an asyncio task and suppress CancelledError."""
+    task.cancel()
+    try:
+        await task
+    except (asyncio.CancelledError, Exception):
+        pass
+
+
+async def run_live_drone(args, shared_state, shutdown, shutdown_read_fd=None,
+                         takeoff_done=None, pipeline_quit_cb=None, config=None, ui_state=None):
     """Connect to drone and run live control loop with Hailo detections.
 
     If takeoff_done is a threading.Event, it is set after takeoff and offboard start,
@@ -688,13 +775,12 @@ async def run_live_drone(args, shared_state, shutdown, shutdown_read_fd=None, ta
             shutdown.set()
         loop.add_reader(shutdown_read_fd, _on_shutdown_pipe)
 
-    mavsdk_server = DetachedMavsdkServer(args.connection)
-    connection_url = mavsdk_server.__enter__()
-    try:
+    manage_takeoff_landing = not getattr(args, 'no_takeoff_landing', False)
+
+    with DetachedMavsdkServer(args.connection) as connection_url:
         drone = System()
         await drone.connect(system_address=connection_url)
 
-        manage_takeoff_landing = not getattr(args, 'no_takeoff_landing', False)
         if manage_takeoff_landing:
             LOGGER.info("[drone] Connecting and taking off...")
         else:
@@ -711,46 +797,21 @@ async def run_live_drone(args, shared_state, shutdown, shutdown_read_fd=None, ta
         else:
             await _require_offboard_mode(drone)
 
-        # PX4 requires setpoints to be streamed before offboard.start() (NO_SETPOINT_SET otherwise).
-        # Stream zero setpoint at ~20 Hz.
         vel_api = VelocityCommandAPI(drone, config)
-        setpoint_period_s = 0.05
+        await _start_offboard(drone, vel_api, shutdown)
+        if shutdown.is_set():
+            return
 
-        # Initial stream of setpoints
-        for _ in range(int(2.0 / setpoint_period_s)):
-            if shutdown.is_set():
-                return
-            await vel_api.send_raw(VelocityBodyYawspeed(0.0, 0.0, 0.0, 0.0))
-            await asyncio.sleep(setpoint_period_s)
-
-        # Try to start offboard mode, with retry
-        max_retries = 3
-        for attempt in range(max_retries):
-            try:
-                await drone.offboard.start()
-                break
-            except OffboardError as e:
-                if attempt == max_retries - 1:
-                    raise
-                LOGGER.warning("[drone] Failed to start offboard (%s), retrying...", e)
-                # Send more setpoints before retrying
-                for _ in range(int(1.0 / setpoint_period_s)):
-                    if shutdown.is_set():
-                        return
-                    await vel_api.send_raw(VelocityBodyYawspeed(0.0, 0.0, 0.0, 0.0))
-                    await asyncio.sleep(setpoint_period_s)
-        offboard_started = True
         if manage_takeoff_landing:
             await asyncio.sleep(3)
-        # When not manage_takeoff_landing we do not call offboard.stop() on exit (don't change mode)
 
         if takeoff_done is not None:
             takeoff_done.set()
 
         altitude_cache: dict = {}
         alt_task = asyncio.create_task(_telemetry_altitude_task(drone, altitude_cache, shutdown))
-
-        task = asyncio.create_task(live_control_loop(drone, shared_state, config, shutdown, altitude_cache, ui_state=ui_state))
+        control_task = asyncio.create_task(
+            live_control_loop(drone, shared_state, config, shutdown, altitude_cache, ui_state=ui_state))
         watch_task = None
         if not manage_takeoff_landing:
             watch_task = asyncio.create_task(_watch_offboard_mode(drone, shutdown))
@@ -764,58 +825,21 @@ async def run_live_drone(args, shared_state, shutdown, shutdown_read_fd=None, ta
                 return_when=asyncio.FIRST_COMPLETED,
             )
             for t in pending:
-                t.cancel()
-                try:
-                    await t
-                except asyncio.CancelledError:
-                    pass
+                await _cancel_task(t)
             if shutdown.is_set():
                 LOGGER.warning("[drone] Shutdown requested, landing...")
         except asyncio.CancelledError:
             LOGGER.warning("[drone] Shutdown requested, landing...")
         finally:
-            alt_task.cancel()
-            try:
-                await alt_task
-            except asyncio.CancelledError:
-                pass
+            await _cancel_task(alt_task)
             if watch_task is not None:
-                watch_task.cancel()
-                try:
-                    await watch_task
-                except asyncio.CancelledError:
-                    pass
-            if offboard_started and drone is not None and manage_takeoff_landing:
-                try:
-                    await vel_api.send_zero()
-                    await drone.offboard.stop()
-                except OffboardError as e:
-                    _print_connection_error("[drone] Offboard stop", e, hint=False)
-                except Exception as e:
-                    _print_connection_error("[drone] Offboard stop", e, hint=False)
-                LOGGER.warning("[drone] Landing safely - please wait (ignoring further Ctrl+C until done)...")
-                try:
-                    _ignore_sigint_during_landing(ignore=True)
-                    LOGGER.info("[drone] Landing...")
-                    try:
-                        await drone.action.land()
-                        await asyncio.sleep(8)
-                    except Exception as e:
-                        _print_connection_error("[drone] Land", e, hint=False)
-                finally:
-                    _ignore_sigint_during_landing(ignore=False)
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
-            except Exception:
-                pass
+                await _cancel_task(watch_task)
+            if manage_takeoff_landing:
+                await _land_safely(drone, vel_api)
+            await _cancel_task(control_task)
             if pipeline_quit_cb is not None:
                 try:
                     pipeline_quit_cb()
                 except Exception:
                     pass
         LOGGER.info("[drone] Done.")
-    finally:
-        mavsdk_server.__exit__(None, None, None)

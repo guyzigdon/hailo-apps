@@ -57,7 +57,7 @@ def _configure_logging(verbosity: str) -> None:
 
 def _maybe_clear_target_after_lost(user_data):
     """Clear the follow target only if it has been missing longer than tracking_lost_timeout_s."""
-    target_state = getattr(user_data, 'target_state', None)
+    target_state = user_data.target_state
     if target_state is None:
         return
     target_id = target_state.get_target()
@@ -67,26 +67,8 @@ def _maybe_clear_target_after_lost(user_data):
     if last_seen is None:
         target_state.set_target(None)
         return
-    timeout_s = getattr(user_data, 'tracking_lost_timeout_s', 2.0)
-    if time.monotonic() - last_seen >= timeout_s:
+    if time.monotonic() - last_seen >= user_data.tracking_lost_timeout_s:
         target_state.set_target(None)
-
-
-def _extract_frame(element, buffer):
-    """Extract a numpy RGB frame from the GStreamer buffer (returns None on failure)."""
-    try:
-        from hailo_apps.python.core.common.buffer_utils import (
-            get_caps_from_pad, get_numpy_from_buffer,
-        )
-        pad = element.get_static_pad("src")
-        fmt, width, height = get_caps_from_pad(pad)
-        if fmt is not None and width is not None and height is not None:
-            frame = get_numpy_from_buffer(buffer, fmt, width, height)
-            if isinstance(frame, np.ndarray):
-                return frame
-    except Exception:
-        pass
-    return None
 
 
 def _build_det_info(person, track_id=None):
@@ -107,44 +89,24 @@ def _build_det_info(person, track_id=None):
     return det_info
 
 
-def app_callback(element, buffer, user_data):
-    """Tiling pipeline callback: pick largest person (or specific tracked person), update shared state.
-
-    When ByteTracker is enabled (user_data.byte_tracker is not None):
-    1. Convert detections to Nx5 array, run tracker.update() synchronously
-    2. Each returned track has input_index pointing to the matched detection
-    3. Build person_by_id directly — no cross-frame IoU re-matching needed
-    """
-    import hailo
-    roi = hailo.get_roi_from_buffer(buffer)
-    detections = roi.get_objects_typed(hailo.HAILO_DETECTION)
-    persons = [d for d in detections if d.get_label() == "person"]
-
-    byte_tracker = getattr(user_data, 'byte_tracker', None)
-
-    if not persons:
-        # Still call tracker so it can age out lost tracks
-        if byte_tracker is not None:
-            byte_tracker.update(np.empty((0, 5)))
-        user_data.shared_state.update(None, available_ids=set())
-        if hasattr(user_data, 'target_state') and user_data.target_state is not None:
-            _maybe_clear_target_after_lost(user_data)
-        ui_state = getattr(user_data, 'ui_state', None)
-        if ui_state is not None:
-            following_id = user_data.target_state.get_target() if getattr(user_data, 'target_state', None) else None
-            ui_state.update_detections([], following_id)
-        if user_data.target_state.get_target() is None:
-            LOGGER.info("[SEARCH MODE] No person detected in frame - follow state cleared")
+def _update_ui(ui_state, persons, person_to_id, following_id):
+    """Push detection metadata to the web UI if enabled."""
+    if ui_state is None:
         return
+    all_dets = [_build_det_info(p, person_to_id.get(id(p))) for p in persons]
+    ui_state.update_detections(all_dets, following_id)
 
-    # --- Build detection arrays and run tracker ---
+
+def _run_tracker(byte_tracker, persons, hailo):
+    """Run ByteTracker (or HailoTracker fallback) and return (available_ids, person_by_id, person_to_id).
+
+    person_by_id:  {track_id -> person detection}
+    person_to_id:  {id(person) -> track_id}  (reverse lookup)
+    """
     available_ids = set()
     person_by_id = {}
 
     if byte_tracker is not None:
-        # Convert person detections to Nx5 array [x1, y1, x2, y2, score] in pixel coords
-        # Hailo bboxes are normalized 0-1; ByteTracker needs pixel coords.
-        # Use a fixed reference frame (1000x1000) since we only need consistent scale.
         SCALE = 1000.0
         det_array = np.empty((len(persons), 5), dtype=np.float32)
         for i, person in enumerate(persons):
@@ -155,18 +117,15 @@ def app_callback(element, buffer, user_data):
             det_array[i, 3] = (bbox.ymin() + bbox.height()) * SCALE
             det_array[i, 4] = person.get_confidence()
 
-        # Run tracker synchronously — tracker records input_index on each track
         all_tracks = byte_tracker.update(det_array)
 
         for t in all_tracks:
-            if t.is_activated and t.input_index >= 0 and t.input_index < len(persons):
+            if t.is_activated and 0 <= t.input_index < len(persons):
                 available_ids.add(t.track_id)
                 person_by_id[t.track_id] = persons[t.input_index]
             elif t.is_activated:
-                # Track exists but wasn't matched to a detection this frame (lost track)
                 available_ids.add(t.track_id)
     else:
-        # No tracker — check for HailoTracker IDs on detections (legacy/fallback)
         for person in persons:
             track = person.get_objects_typed(hailo.HAILO_UNIQUE_ID)
             if len(track) == 1:
@@ -174,10 +133,42 @@ def app_callback(element, buffer, user_data):
                 available_ids.add(track_id)
                 person_by_id[track_id] = person
 
+    person_to_id = {id(p): tid for tid, p in person_by_id.items()}
+    return available_ids, person_by_id, person_to_id
+
+
+def app_callback(element, buffer, user_data):
+    """Tiling pipeline callback: pick largest person (or specific tracked person), update shared state.
+
+    When ByteTracker is enabled (user_data.byte_tracker is not None):
+    1. Convert detections to Nx5 array, run tracker.update() synchronously
+    2. Each returned track has input_index pointing to the matched detection
+    3. Build person_by_id directly -- no cross-frame IoU re-matching needed
+    """
+    import hailo
+    roi = hailo.get_roi_from_buffer(buffer)
+    detections = roi.get_objects_typed(hailo.HAILO_DETECTION)
+    persons = [d for d in detections if d.get_label() == "person"]
+
+    target_state = user_data.target_state
+    ui_state = user_data.ui_state
+
+    if not persons:
+        if user_data.byte_tracker is not None:
+            user_data.byte_tracker.update(np.empty((0, 5)))
+        user_data.shared_state.update(None, available_ids=set())
+        if target_state is not None:
+            _maybe_clear_target_after_lost(user_data)
+        _update_ui(ui_state, [], {}, target_state.get_target() if target_state else None)
+        if target_state is None or target_state.get_target() is None:
+            LOGGER.info("[SEARCH MODE] No person detected in frame - follow state cleared")
+        return
+
+    available_ids, person_by_id, person_to_id = _run_tracker(
+        user_data.byte_tracker, persons, hailo)
+
     # --- Target selection ---
-    target_id = None
-    if hasattr(user_data, 'target_state') and user_data.target_state is not None:
-        target_id = user_data.target_state.get_target()
+    target_id = target_state.get_target() if target_state is not None else None
 
     best = None
     follow_mode = ""
@@ -185,32 +176,24 @@ def app_callback(element, buffer, user_data):
         best = person_by_id.get(target_id)
 
         if best is not None:
-            user_data.target_state.update_last_seen()
+            target_state.update_last_seen()
             follow_mode = f"ID {target_id}"
         else:
-            # Target not in frame: clear detection; only drop track ID after grace period
             user_data.shared_state.update(None, available_ids=available_ids)
             _maybe_clear_target_after_lost(user_data)
-            ui_state = getattr(user_data, 'ui_state', None)
-            if ui_state is not None:
-                all_dets = [_build_det_info(p, _find_track_id(p, person_by_id)) for p in persons]
-                following_id = user_data.target_state.get_target()
-                ui_state.update_detections(all_dets, following_id)
-            if user_data.target_state.get_target() is None:
+            _update_ui(ui_state, persons, person_to_id, target_state.get_target())
+            if target_state.get_target() is None:
                 LOGGER.info("[SEARCH MODE] Target ID %s not in frame. Available: %s - follow state cleared",
                             target_id, sorted(available_ids) if available_ids else "none")
             return
     else:
-        # No specific target yet — pick the largest person and lock onto their track ID
         best = max(persons, key=lambda d: d.get_bbox().width() * d.get_bbox().height())
-        best_tid = _find_track_id(best, person_by_id)
-        if best_tid is not None:
-            # Auto-lock: set this track as our follow target so we stick to it
-            if hasattr(user_data, 'target_state') and user_data.target_state is not None:
-                user_data.target_state.set_target(best_tid)
-                follow_mode = f"locked ID {best_tid}"
-            else:
-                follow_mode = f"largest (ID {best_tid})"
+        best_tid = person_to_id.get(id(best))
+        if best_tid is not None and target_state is not None:
+            target_state.set_target(best_tid)
+            follow_mode = f"locked ID {best_tid}"
+        elif best_tid is not None:
+            follow_mode = f"largest (ID {best_tid})"
         else:
             follow_mode = "largest (no tracking)"
 
@@ -226,25 +209,12 @@ def app_callback(element, buffer, user_data):
         timestamp=time.monotonic(),
     ), available_ids=available_ids)
 
-    # Update UI state with all person detections
-    ui_state = getattr(user_data, 'ui_state', None)
-    if ui_state is not None:
-        all_dets = [_build_det_info(p, _find_track_id(p, person_by_id)) for p in persons]
-        following_id = user_data.target_state.get_target() if getattr(user_data, 'target_state', None) else None
-        ui_state.update_detections(all_dets, following_id)
+    _update_ui(ui_state, persons, person_to_id,
+               target_state.get_target() if target_state else None)
 
-    # Log following status
     available_str = f"Available: {sorted(available_ids)}" if available_ids else ""
     LOGGER.info("[FOLLOWING %s] conf=%.2f center=(%.2f,%.2f) h=%.2f %s",
                 follow_mode, best.get_confidence(), cx, cy, bbox.height(), available_str)
-
-
-def _find_track_id(person, person_by_id):
-    """Return the track ID for a person detection, or None."""
-    for tid, p in person_by_id.items():
-        if p is person:
-            return tid
-    return None
 
 
 # ---------------------------------------------------------------------------
@@ -259,11 +229,13 @@ def _add_drone_follow_args(parser):
     # Framing and target geometry
     group.add_argument("--hfov", type=float, default=defaults.hfov)
     group.add_argument("--vfov", type=float, default=defaults.vfov)
-    group.add_argument("--target-bbox-height", type=float, default=defaults.target_bbox_height,
-                       help="Target bbox height (0-1).")
-    group.add_argument("--target-distance", type=float, default=defaults.target_distance_m, metavar="M",
-                       help="Desired horizontal distance to person in metres. Overrides --target-bbox-height "
-                            "by computing the expected bbox height from altitude + distance geometry.")
+    group.add_argument("--target-bbox-height", type=float, default=None,
+                       help=f"Target bbox height (0-1). Mutually exclusive with --target-distance. "
+                            f"(default when no --target-distance: {defaults.target_bbox_height})")
+    group.add_argument("--target-distance", type=float, default=None, metavar="M",
+                       help="Desired horizontal distance to person in metres. Requires --fixed-altitude. "
+                            "Mutually exclusive with --target-bbox-height. "
+                            f"(default: {defaults.target_distance_m})")
     group.add_argument("--person-height", type=float, default=defaults.person_height_m, metavar="M",
                        help=f"Assumed person height for distance calculation (default: {defaults.person_height_m}m)")
 
