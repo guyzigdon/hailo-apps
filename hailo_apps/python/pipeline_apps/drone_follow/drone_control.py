@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import math
 import os
 import signal
@@ -14,6 +15,8 @@ import mavsdk
 from mavsdk import System
 from mavsdk.offboard import OffboardError, VelocityBodyYawspeed
 from mavsdk.telemetry import FlightMode
+
+LOGGER = logging.getLogger("drone_follow.control")
 
 # ---------------------------------------------------------------------------
 # Data structures
@@ -95,6 +98,7 @@ class ControllerConfig:
     kd_forward: float = 2.0            # derivative gain: anticipate person movement
 
     takeoff_altitude: float = 3.0
+    log_verbosity: str = "normal"  # quiet | normal | debug
 
     @classmethod
     def from_args(cls, args):
@@ -144,6 +148,7 @@ class ControllerConfig:
             forward_alpha=_arg("forward_alpha", default=defaults.forward_alpha),
             kd_forward=_arg("kd_forward", default=defaults.kd_forward),
             takeoff_altitude=_arg("takeoff_altitude", default=defaults.takeoff_altitude),
+            log_verbosity=_arg("log_verbosity", default=defaults.log_verbosity),
         )
 
 # ---------------------------------------------------------------------------
@@ -255,9 +260,8 @@ def _calculate_forward_speed(
         forward = config.kp_forward * math.sqrt(height_delta)
     else:
         forward = -config.kp_backward * math.sqrt(-height_delta)
-    
+
     # Bottom-of-frame backward: bbox bottom edge past threshold means drone is above and too close
-    bottom_backward = 0.0
     max_y = detection.center_y + detection.bbox_height / 2
     if max_y > config.bottom_y_threshold:
         y_excess = max_y - config.bottom_y_threshold
@@ -364,7 +368,7 @@ def compute_velocity_command(
 
     # Altitude
     down = 0.0
-    if not config.fixed_altitude:
+    if not config.fixed_altitude and not config.yaw_only:
         down = 0.0 if abs(error_y_deg) < config.dead_zone_deg else config.kp_down * error_y_deg
         down = max(-config.max_down_speed, min(config.max_down_speed, down))
 
@@ -411,11 +415,11 @@ class DetachedMavsdkServer:
             server_path = None
             
         if not server_path or not os.path.exists(server_path):
-            print(f"[drone] Warning: mavsdk_server not found at {server_path}, using default System() behavior")
+            LOGGER.warning("[drone] mavsdk_server not found at %s, using default System() behavior", server_path)
             return self.connection_url # Fallback to default behavior
 
         cmd = [server_path, "-u", self.connection_url, "-p", str(self.port)]
-        print(f"[drone] Starting detached mavsdk_server: {' '.join(cmd)}")
+        LOGGER.info("[drone] Starting detached mavsdk_server: %s", " ".join(cmd))
 
         self.process = subprocess.Popen(
             cmd,
@@ -439,7 +443,7 @@ class DetachedMavsdkServer:
 
 def _exit_if_not_offboard(reason: str) -> None:
     """Exit the process immediately. Use when --no-takeoff-landing and drone must be OFFBOARD."""
-    print(f"[drone] {reason}", file=sys.stderr)
+    LOGGER.error("[drone] %s", reason)
     sys.stderr.flush()
     os._exit(1)
 
@@ -469,11 +473,11 @@ def _print_connection_error(prefix: str, e: Exception, hint: bool = False) -> No
     """Print a short message when failure is due to lost connection (e.g. sim closed)."""
     msg = str(e).lower()
     if "unavailable" in msg or "connection refused" in msg or "connection reset" in msg:
-        print(f"{prefix}: connection lost (sim or MAVSDK backend closed).")
+        LOGGER.warning("%s: connection lost (sim or MAVSDK backend closed).", prefix)
         if hint:
-            print("[drone] Tip: press Ctrl+C once and wait for landing before closing the sim.")
+            LOGGER.warning("[drone] Tip: press Ctrl+C once and wait for landing before closing the sim.")
     else:
-        print(f"{prefix}: {e}")
+        LOGGER.warning("%s: %s", prefix, e)
 
 
 def _ignore_sigint_during_landing(ignore: bool) -> None:
@@ -532,11 +536,13 @@ async def live_control_loop(drone, shared_state, config, shutdown, altitude_cach
     """
     vel_api = VelocityCommandAPI(drone, config)
 
-    def _log(msg):
+    def _log(msg: str, level: int = logging.INFO):
+        if not LOGGER.isEnabledFor(level):
+            return
         if ui_state is not None:
             ui_state.push_log(msg)
         else:
-            print(msg, flush=True)
+            LOGGER.log(level, msg)
 
     period = 1.0 / max(0.1, min(config.control_loop_hz, 5.0))
     last_detection_time = time.monotonic()
@@ -575,14 +581,14 @@ async def live_control_loop(drone, shared_state, config, shutdown, altitude_cach
             # Check search timeout
             time_since_detection = time.monotonic() - last_detection_time
             if time_since_detection > config.search_timeout_s:
-                _log(f"[drone] Search timeout ({config.search_timeout_s}s) exceeded - no person found. Landing...")
+                _log(f"[drone] Search timeout ({config.search_timeout_s}s) exceeded - no person found. Landing...", level=logging.WARNING)
                 shutdown.set()
                 break
 
             # Detect takeoff_altitude changes and start goto
             if config.takeoff_altitude != _prev_takeoff_alt:
                 _goto_altitude = config.takeoff_altitude
-                _log(f"[drone] Altitude changed: going to {_goto_altitude:.1f}m")
+                _log(f"[drone] Altitude changed: going to {_goto_altitude:.1f}m", level=logging.INFO)
                 _prev_takeoff_alt = config.takeoff_altitude
 
             target_override = None
@@ -606,7 +612,7 @@ async def live_control_loop(drone, shared_state, config, shutdown, altitude_cach
             if _goto_altitude is not None and altitude_cache.get("m") is not None:
                 alt_error = _goto_altitude - altitude_cache["m"]
                 if abs(alt_error) < _GOTO_TOLERANCE:
-                    _log(f"[drone] Reached target altitude {_goto_altitude:.1f}m")
+                    _log(f"[drone] Reached target altitude {_goto_altitude:.1f}m", level=logging.INFO)
                     _goto_altitude = None
                 else:
                     down_speed = max(-_GOTO_MAX_SPEED, min(_GOTO_MAX_SPEED, -_GOTO_KP * alt_error))
@@ -614,24 +620,19 @@ async def live_control_loop(drone, shared_state, config, shutdown, altitude_cach
 
             now = time.monotonic()
 
-            # Explain forward-velocity calculation in logs (throttled)
+            # Forward-velocity log (throttled)
             if now - _last_fwd_log_time >= _FWD_LOG_INTERVAL and detection is not None:
-                e = {}
-                _calculate_forward_speed(detection, config,
-                    target_override if target_override is not None else config.target_bbox_height,
-                    explain=e)
-                _log(f"[FWD] {e.get('reason', e.get('mode', '-'))} "
-                     f"target={e.get('target_bh', 0):.2f} bbox={e.get('bbox_h', 0):.2f} "
-                     f"err={e.get('height_delta', 0):+.3f} raw={e.get('raw_forward', 0):+.2f} "
-                     f"bottom={e.get('bottom_backward', 0):+.2f} final={e.get('final_forward', 0):+.2f}")
+                target_bh = target_override if target_override is not None else config.target_bbox_height
+                _log(f"[FWD] target={target_bh:.2f} bbox={detection.bbox_height:.2f} "
+                     f"final={cmd.forward_m_s:+.2f}", level=logging.DEBUG)
                 _last_fwd_log_time = now
 
             cmd = await vel_api.send(cmd)
             if drone is None:
                 tag = "TRACK" if detection is not None else "SEARCH"
-                print(f"\r[{tag}] Yaw:{cmd.yawspeed_deg_s:+6.1f}\u00b0/s  "
-                      f"Fwd:{cmd.forward_m_s:+5.2f}m/s  "
-                      f"Down:{cmd.down_m_s:+5.2f}m/s", end="")
+                _log(f"[{tag}] Yaw:{cmd.yawspeed_deg_s:+6.1f}\u00b0/s  "
+                     f"Fwd:{cmd.forward_m_s:+5.2f}m/s  "
+                     f"Down:{cmd.down_m_s:+5.2f}m/s", level=logging.INFO)
             if ui_state is not None:
                 mode = "TRACK" if detection is not None else ("SEARCH" if time_since_detection >= config.search_enter_delay_s else "SEARCH-WAIT")
                 ui_state.update_velocity(cmd.forward_m_s, cmd.down_m_s, cmd.yawspeed_deg_s, mode)
@@ -645,12 +646,12 @@ async def live_control_loop(drone, shared_state, config, shutdown, altitude_cach
                 if detection is not None:
                     _log(f"[TRACK] Yaw:{cmd.yawspeed_deg_s:+5.1f} Fwd:{cmd.forward_m_s:+5.2f} Down:{cmd.down_m_s:+5.2f}"
                          f" pos=({detection.center_x:.2f},{detection.center_y:.2f}) bbox_h={detection.bbox_height:.2f}"
-                         f"{eff_str}{alt_str}")
+                         f"{eff_str}{alt_str}", level=logging.INFO)
                 elif time_since_detection < config.search_enter_delay_s:
-                    _log(f"[SEARCH-WAIT] entering search in {config.search_enter_delay_s - time_since_detection:.1f}s{alt_str}")
+                    _log(f"[SEARCH-WAIT] entering search in {config.search_enter_delay_s - time_since_detection:.1f}s{alt_str}", level=logging.INFO)
                 else:
                     search_dir = "right" if cmd.yawspeed_deg_s > 0 else "left"
-                    _log(f"[SEARCH] Spinning {search_dir} at {abs(cmd.yawspeed_deg_s):.1f} deg/s{alt_str}")
+                    _log(f"[SEARCH] Spinning {search_dir} at {abs(cmd.yawspeed_deg_s):.1f} deg/s{alt_str}", level=logging.INFO)
 
             await asyncio.sleep(period)
     except asyncio.CancelledError:
@@ -695,9 +696,9 @@ async def run_live_drone(args, shared_state, shutdown, shutdown_read_fd=None, ta
 
         manage_takeoff_landing = not getattr(args, 'no_takeoff_landing', False)
         if manage_takeoff_landing:
-            print("[drone] Connecting and taking off...")
+            LOGGER.info("[drone] Connecting and taking off...")
         else:
-            print("[drone] Connecting (drone must already be in OFFBOARD)...")
+            LOGGER.info("[drone] Connecting (drone must already be in OFFBOARD)...")
         async for state in drone.core.connection_state():
             if state.is_connected:
                 break
@@ -731,7 +732,7 @@ async def run_live_drone(args, shared_state, shutdown, shutdown_read_fd=None, ta
             except OffboardError as e:
                 if attempt == max_retries - 1:
                     raise
-                print(f"[drone] Failed to start offboard ({e}), retrying...")
+                LOGGER.warning("[drone] Failed to start offboard (%s), retrying...", e)
                 # Send more setpoints before retrying
                 for _ in range(int(1.0 / setpoint_period_s)):
                     if shutdown.is_set():
@@ -769,9 +770,9 @@ async def run_live_drone(args, shared_state, shutdown, shutdown_read_fd=None, ta
                 except asyncio.CancelledError:
                     pass
             if shutdown.is_set():
-                print("\n[drone] Shutdown requested, landing...")
+                LOGGER.warning("[drone] Shutdown requested, landing...")
         except asyncio.CancelledError:
-            print("\n[drone] Shutdown requested, landing...")
+            LOGGER.warning("[drone] Shutdown requested, landing...")
         finally:
             alt_task.cancel()
             try:
@@ -792,10 +793,10 @@ async def run_live_drone(args, shared_state, shutdown, shutdown_read_fd=None, ta
                     _print_connection_error("[drone] Offboard stop", e, hint=False)
                 except Exception as e:
                     _print_connection_error("[drone] Offboard stop", e, hint=False)
-                print("[drone] Landing safely - please wait (ignoring further Ctrl+C until done)...")
+                LOGGER.warning("[drone] Landing safely - please wait (ignoring further Ctrl+C until done)...")
                 try:
                     _ignore_sigint_during_landing(ignore=True)
-                    print("[drone] Landing...")
+                    LOGGER.info("[drone] Landing...")
                     try:
                         await drone.action.land()
                         await asyncio.sleep(8)
@@ -815,6 +816,6 @@ async def run_live_drone(args, shared_state, shutdown, shutdown_read_fd=None, ta
                     pipeline_quit_cb()
                 except Exception:
                     pass
-        print("[drone] Done.")
+        LOGGER.info("[drone] Done.")
     finally:
         mavsdk_server.__exit__(None, None, None)

@@ -10,6 +10,7 @@ Pipeline options (--input, --input-codec, etc.) are passed through to the tiling
 
 import argparse
 import asyncio
+import logging
 import os
 import signal
 import threading
@@ -36,6 +37,18 @@ try:
     from byte_tracker import ByteTracker
 except ImportError:
     from .byte_tracker import ByteTracker
+
+LOGGER = logging.getLogger("drone_follow.app")
+
+
+def _configure_logging(verbosity: str) -> None:
+    level = {
+        "quiet": logging.WARNING,
+        "normal": logging.INFO,
+        "debug": logging.DEBUG,
+    }.get(verbosity, logging.INFO)
+    logging.basicConfig(level=level, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    logging.getLogger().setLevel(level)
 
 
 # ---------------------------------------------------------------------------
@@ -121,7 +134,7 @@ def app_callback(element, buffer, user_data):
             following_id = user_data.target_state.get_target() if getattr(user_data, 'target_state', None) else None
             ui_state.update_detections([], following_id)
         if user_data.target_state.get_target() is None:
-            print(f"\r[SEARCH MODE] No person detected in frame - follow state cleared", end="", flush=True)
+            LOGGER.info("[SEARCH MODE] No person detected in frame - follow state cleared")
         return
 
     # --- Build detection arrays and run tracker ---
@@ -184,7 +197,8 @@ def app_callback(element, buffer, user_data):
                 following_id = user_data.target_state.get_target()
                 ui_state.update_detections(all_dets, following_id)
             if user_data.target_state.get_target() is None:
-                print(f"\r[SEARCH MODE] Target ID {target_id} not in frame. Available: {sorted(available_ids) if available_ids else 'none'} - follow state cleared", end="", flush=True)
+                LOGGER.info("[SEARCH MODE] Target ID %s not in frame. Available: %s - follow state cleared",
+                            target_id, sorted(available_ids) if available_ids else "none")
             return
     else:
         # No specific target yet — pick the largest person and lock onto their track ID
@@ -221,7 +235,8 @@ def app_callback(element, buffer, user_data):
 
     # Log following status
     available_str = f"Available: {sorted(available_ids)}" if available_ids else ""
-    print(f"\r[FOLLOWING {follow_mode}] conf={best.get_confidence():.2f} center=({cx:.2f},{cy:.2f}) h={bbox.height():.2f} {available_str}".ljust(120), end="", flush=True)
+    LOGGER.info("[FOLLOWING %s] conf=%.2f center=(%.2f,%.2f) h=%.2f %s",
+                follow_mode, best.get_confidence(), cx, cy, bbox.height(), available_str)
 
 
 def _find_track_id(person, person_by_id):
@@ -240,6 +255,10 @@ def _add_drone_follow_args(parser):
     """Register drone-follow CLI flags on a pipeline parser."""
     defaults = ControllerConfig()
     group = parser.add_argument_group("drone-follow")
+
+    # Framing and target geometry
+    group.add_argument("--hfov", type=float, default=defaults.hfov)
+    group.add_argument("--vfov", type=float, default=defaults.vfov)
     group.add_argument("--target-bbox-height", type=float, default=defaults.target_bbox_height,
                        help="Target bbox height (0-1).")
     group.add_argument("--target-distance", type=float, default=defaults.target_distance_m, metavar="M",
@@ -247,6 +266,9 @@ def _add_drone_follow_args(parser):
                             "by computing the expected bbox height from altitude + distance geometry.")
     group.add_argument("--person-height", type=float, default=defaults.person_height_m, metavar="M",
                        help=f"Assumed person height for distance calculation (default: {defaults.person_height_m}m)")
+
+    # Controller gains and loop behavior
+    group.add_argument("--control-loop-hz", type=float, default=defaults.control_loop_hz)
     group.add_argument("--dead-zone-height-percent", type=float, default=defaults.dead_zone_height_percent,
                        help="Forward dead zone as %% of target bbox height (default: 5)")
     group.add_argument("--yaw-gain", dest="kp_yaw", type=float, default=defaults.kp_yaw)
@@ -254,50 +276,34 @@ def _add_drone_follow_args(parser):
     group.add_argument("--backward-gain", dest="kp_backward", type=float, default=defaults.kp_backward,
                        help="Gain for backward movement when too close (default: 5.0)")
     group.add_argument("--pitch-gain", dest="kp_down", type=float, default=defaults.kp_down)
-    
-    # Connectivity
-    group.add_argument("--connection", default="udpin://0.0.0.0:14540",
-                       help="MAVLink connection string (default: udpin://0.0.0.0:14540)")
-    group.add_argument("--serial", nargs="?", const="/dev/ttyACM0", default=None,
-                       metavar="DEVICE",
-                       help="Connect to CubeOrange via serial cable instead of UDP. "
-                            "Optionally specify device path (default: /dev/ttyACM0)")
-    group.add_argument("--serial-baud", type=int, default=57600,
-                       help="Baud rate for serial connection (default: 57600)")    
-    group.add_argument("--follow-server-port", type=int, default=8080,
-                       help="HTTP server port for target selection (only with --enable-tracking)")
 
-    # UI options
-    group.add_argument("--ui", action="store_true",
-                       help="Enable web UI with live video and clickable bounding boxes")
-    group.add_argument("--ui-port", type=int, default=5001,
-                       help="Web UI server port (default: 5001)")
-    group.add_argument("--ui-fps", type=int, default=10,
-                       help="MJPEG stream frame rate (default: 10)")
-
-    
+    # Flight mode and mission lifecycle
+    group.add_argument("--fixed-altitude", action="store_true")
+    group.add_argument("--yaw-only", action="store_true",
+                       help="Yaw only mode: no forward/backward or altitude movement")
     group.add_argument("--no-takeoff-landing", action="store_true",
                        help="Do not take off or land; assume drone is already in offboard mode")
     group.add_argument("--takeoff-altitude", type=float, default=defaults.takeoff_altitude)
     group.add_argument("--mission-duration", type=float, default=300.0)
-    group.add_argument("--hfov", type=float, default=defaults.hfov)
-    group.add_argument("--vfov", type=float, default=defaults.vfov)
-    group.add_argument("--fixed-altitude", action="store_true")
-    group.add_argument("--yaw-only", action="store_true",
-                       help="Yaw only mode: no forward/backward or altitude movement")
+
+    # Search/follow behavior
     group.add_argument("--search-enter-delay", type=float, default=defaults.search_enter_delay_s,
                        help="Seconds without detection before active search starts (default: 2.0)")
+    group.add_argument("--search-vel-damp", type=float, default=defaults.search_vel_damp,
+                       help="Dampening factor for forward/backward speed during search based on last detection (default: 0.3)")
+    group.add_argument("--search-timeout", type=float, default=defaults.search_timeout_s,
+                       help="Seconds before landing if no person is found (default: 60.0)")
     group.add_argument("--tracking-lost-timeout", type=float, default=2.0,
                        help="Seconds to keep following a track ID after target leaves frame (looser tracking)")
-    
-    
-    group.add_argument("--control-loop-hz", type=float, default=defaults.control_loop_hz)
-    
+
     # Smoothing
     group.add_argument("--smooth-forward", action=argparse.BooleanOptionalAction, default=defaults.smooth_forward,
                        help=f"Enable/disable forward velocity smoothing (default: {defaults.smooth_forward})")
     group.add_argument("--forward-alpha", type=float, default=defaults.forward_alpha,
                        help=f"EMA smoothing factor for forward velocity (0=sluggish, 1=no smoothing, default: {defaults.forward_alpha})")
+    group.add_argument("--log-verbosity", choices=["quiet", "normal", "debug"], default=defaults.log_verbosity,
+                       help="Console log verbosity (default: normal)")
+
     # Safety limits
     group.add_argument("--max-forward", type=float, default=defaults.max_forward,
                        help=f"Max forward speed in m/s (default: {defaults.max_forward})")
@@ -306,19 +312,32 @@ def _add_drone_follow_args(parser):
     group.add_argument("--max-bbox-height-safety", type=float, default=defaults.max_bbox_height_safety,
                        help="Safety limit: stop/retreat if bbox height > limit (0.0-1.0) (default: 0.8)")
 
-    group.add_argument("--search-vel-damp", type=float, default=defaults.search_vel_damp,
-                       help="Dampening factor for forward/backward speed during search based on last detection (default: 0.3)")
-    # For future use, currently not used
-    group.add_argument("--search-timeout", type=float, default=defaults.search_timeout_s,
-                       help="Seconds before landing if no person is found (default: 60.0)") 
-    
+    # Connectivity
+    group.add_argument("--connection", default="udpin://0.0.0.0:14540",
+                       help="MAVLink connection string (default: udpin://0.0.0.0:14540)")
+    group.add_argument("--serial", nargs="?", const="/dev/ttyACM0", default=None,
+                       metavar="DEVICE",
+                       help="Connect to CubeOrange via serial cable instead of UDP. "
+                            "Optionally specify device path (default: /dev/ttyACM0)")
+    group.add_argument("--serial-baud", type=int, default=57600,
+                       help="Baud rate for serial connection (default: 57600)")
+
+    # Servers/UI
+    group.add_argument("--follow-server-port", type=int, default=8080,
+                       help="HTTP server port for target selection (only with --enable-tracking)")
+    group.add_argument("--ui", action="store_true",
+                       help="Enable web UI with live video and clickable bounding boxes")
+    group.add_argument("--ui-port", type=int, default=5001,
+                       help="Web UI server port (default: 5001)")
+    group.add_argument("--ui-fps", type=int, default=10,
+                       help="MJPEG stream frame rate (default: 10)")
 
 def _resolve_serial_connection(args):
     """If --serial is given, override --connection with a serial:// URI."""
     if getattr(args, "serial", None) is not None:
         baud = getattr(args, "serial_baud", 57600)
         args.connection = f"serial://{args.serial}:{baud}"
-        print(f"[drone] Serial mode: connection = {args.connection}")
+        LOGGER.info("[drone] Serial mode: connection = %s", args.connection)
 
 
 def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None, ui_fps=10):
@@ -502,7 +521,7 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
         tracker = ByteTracker(
             track_thresh=0.4, track_buffer=90, match_thresh=0.5, frame_rate=30,
         )
-        print("[tracking] ByteTracker running synchronously in callback")
+        LOGGER.info("[tracking] ByteTracker running synchronously in callback")
 
     user_data = DroneFollowUserData(
         shared_state, target_state, ui_state=ui_state, byte_tracker=tracker,
@@ -533,7 +552,9 @@ def main():
     ui_pre.add_argument("--ui-port", type=int, default=5001)
     ui_pre.add_argument("--ui-fps", type=int, default=10)
     ui_pre.add_argument("--enable-tracking", action="store_true")
+    ui_pre.add_argument("--log-verbosity", choices=["quiet", "normal", "debug"], default="normal")
     ui_pre_args, _ = ui_pre.parse_known_args()
+    _configure_logging(ui_pre_args.log_verbosity)
 
     ui_state = None
     web_server = None
@@ -547,20 +568,21 @@ def main():
         _ui_build_index = os.path.join(
             os.path.dirname(os.path.abspath(__file__)), "ui", "build", "index.html")
         if not os.path.isfile(_ui_build_index):
-            print("ERROR: Web UI has not been built yet.")
-            print("  cd hailo_apps/python/pipeline_apps/drone_follow/ui")
-            print("  npm install")
-            print("  npm run build")
+            LOGGER.error("Web UI has not been built yet.")
+            LOGGER.error("  cd hailo_apps/python/pipeline_apps/drone_follow/ui")
+            LOGGER.error("  npm install")
+            LOGGER.error("  npm run build")
             raise SystemExit(1)
         # Auto-enable tracking for UI (stable IDs needed for click-to-follow)
         if not ui_pre_args.enable_tracking:
             import sys as _sys
             _sys.argv.append("--enable-tracking")
-            print("[ui] Auto-enabling tracking for UI mode")
+            LOGGER.info("[ui] Auto-enabling tracking for UI mode")
 
     app = create_app(shared_state, target_state=target_state, eos_reached=eos_reached,
                      ui_state=ui_state, ui_fps=ui_pre_args.ui_fps)
     args = app.options_menu
+    _configure_logging(getattr(args, "log_verbosity", ui_pre_args.log_verbosity))
     _resolve_serial_connection(args)
 
     # Create controller config once so it can be shared (and mutated via web UI)
@@ -598,7 +620,7 @@ def main():
     def on_signal(*_):
         if not shutdown.is_set():
             shutdown.set()
-            print("\n[drone] Ctrl+C received, shutting down...")
+            LOGGER.warning("[drone] Ctrl+C received, shutting down...")
     try:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
@@ -616,7 +638,7 @@ def main():
     except KeyboardInterrupt:
         if not shutdown.is_set():
             shutdown.set()
-        print("\n[drone] Shutdown.")
+        LOGGER.warning("[drone] Shutdown.")
     finally:
         if web_server is not None:
             web_server.stop()

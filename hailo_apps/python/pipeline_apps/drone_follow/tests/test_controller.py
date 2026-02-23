@@ -1,6 +1,7 @@
 """Tests for the FOV-aware proportional controller."""
 
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -86,7 +87,8 @@ class TestYaw:
         cmd_a = compute_velocity_command(det, cfg_a)
         cmd_b = compute_velocity_command(det, cfg_b)
         ratio = cmd_b.yawspeed_deg_s / cmd_a.yawspeed_deg_s
-        assert abs(ratio - 2.0) < 0.01
+        # Yaw controller uses sqrt(|error_x_deg|), so doubling FOV scales by sqrt(2).
+        assert abs(ratio - (2.0 ** 0.5)) < 0.01
 
 
 # ---- Altitude (vertical centering) ----
@@ -211,7 +213,8 @@ class TestCombined:
             max_yawspeed=9999.0, max_down_speed=9999.0,
             max_forward=9999.0, max_backward=9999.0,
         )
-        det = _det(cx=0.65, cy=0.65, bh=0.15)
+        # Keep bbox away from bottom-of-frame safety path so kp_forward scaling is isolated.
+        det = _det(cx=0.65, cy=0.6, bh=0.15)
         cmd_low = compute_velocity_command(det, cfg_low)
         cmd_high = compute_velocity_command(det, cfg_high)
 
@@ -220,3 +223,66 @@ class TestCombined:
         assert abs(cmd_high.forward_m_s / cmd_low.forward_m_s - 2.0) < 0.01
 
 
+class TestSafetyAndFollowing:
+    def test_safety_retreat_overrides_forward_logic(self):
+        """Over safety bbox threshold should force max backward retreat."""
+        cfg = ControllerConfig(
+            target_bbox_height=0.3,
+            max_bbox_height_safety=0.6,
+            dead_zone_height_percent=50.0,
+        )
+        cmd = compute_velocity_command(_det(bh=0.75), cfg)
+        assert cmd.forward_m_s == -cfg.max_backward
+
+    def test_bottom_of_frame_triggers_backward_safety(self):
+        """A low-in-frame target should command backward movement."""
+        cfg = ControllerConfig(
+            target_bbox_height=0.3,
+            dead_zone_height_percent=30.0,
+            bottom_y_threshold=0.7,
+        )
+        # max_y = center_y + bbox_height/2 = 0.95 (> 0.7 threshold)
+        cmd = compute_velocity_command(_det(cy=0.8, bh=0.3), cfg)
+        assert cmd.forward_m_s < 0.0
+
+    def test_yaw_only_keeps_yaw_and_disables_altitude_and_forward(self):
+        """Yaw-only mode still tracks yaw but zeroes forward/down commands."""
+        cfg = ControllerConfig(yaw_only=True, fixed_altitude=False, dead_zone_deg=0.0)
+        cmd = compute_velocity_command(_det(cx=0.8, cy=0.2, bh=0.1), cfg)
+        assert cmd.yawspeed_deg_s > 0.0
+        assert cmd.forward_m_s == 0.0
+        assert cmd.down_m_s == 0.0
+
+    def test_search_spins_toward_last_seen_side(self):
+        """When target is lost, search yaw direction should follow last known side."""
+        cfg = ControllerConfig()
+        last_right = _det(cx=0.8, bh=0.2)
+        last_left = _det(cx=0.2, bh=0.2)
+        cmd_right = compute_velocity_command(None, cfg, last_detection=last_right)
+        cmd_left = compute_velocity_command(None, cfg, last_detection=last_left)
+        assert cmd_right.yawspeed_deg_s > 0.0
+        assert cmd_left.yawspeed_deg_s < 0.0
+
+    def test_search_wait_holds_previous_velocity(self):
+        """Before active search, controller should hold last velocity."""
+        cfg = ControllerConfig()
+        hold = compute_velocity_command(_det(cx=0.7, cy=0.5, bh=0.3), cfg)
+        cmd = compute_velocity_command(
+            None,
+            cfg,
+            search_active=False,
+            hold_velocity=hold,
+        )
+        assert cmd.forward_m_s == hold.forward_m_s
+        assert cmd.down_m_s == hold.down_m_s
+        assert cmd.yawspeed_deg_s == hold.yawspeed_deg_s
+
+
+class TestConfigArgs:
+    def test_log_verbosity_defaults_to_normal(self):
+        cfg = ControllerConfig.from_args(SimpleNamespace())
+        assert cfg.log_verbosity == "normal"
+
+    def test_log_verbosity_is_read_from_args(self):
+        cfg = ControllerConfig.from_args(SimpleNamespace(log_verbosity="debug"))
+        assert cfg.log_verbosity == "debug"
