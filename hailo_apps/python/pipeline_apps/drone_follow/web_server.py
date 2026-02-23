@@ -35,6 +35,13 @@ class SharedUIState:
         self._detections: list = []
         self._following_id: Optional[int] = None
         self._frame_jpeg: Optional[bytes] = None
+        self._velocity = {
+            "forward_m_s": 0.0,
+            "down_m_s": 0.0,
+            "yawspeed_deg_s": 0.0,
+            "mode": "IDLE",
+            "ts": time.time(),
+        }
         self._frame_event = threading.Event()
         self._logs: deque = deque(maxlen=200)
         self._log_counter: int = 0
@@ -59,6 +66,18 @@ class SharedUIState:
             return {
                 "detections": list(self._detections),
                 "following_id": self._following_id,
+                "velocity": dict(self._velocity),
+            }
+
+    def update_velocity(self, forward_m_s: float, down_m_s: float, yawspeed_deg_s: float, mode: str):
+        """Called from control loop to expose current command velocity in UI."""
+        with self._lock:
+            self._velocity = {
+                "forward_m_s": float(forward_m_s),
+                "down_m_s": float(down_m_s),
+                "yawspeed_deg_s": float(yawspeed_deg_s),
+                "mode": str(mode),
+                "ts": time.time(),
             }
 
     def push_log(self, message: str):
@@ -179,12 +198,17 @@ class _WebHandler(BaseHTTPRequestHandler):
     _CONFIG_FIELDS = {
         "kp_yaw": float,
         "kp_forward": float,
+        "kp_backward": float,
         "max_forward": float,
         "max_backward": float,
         "yaw_only": bool,
         "fixed_altitude": bool,
-        "target_bbox_height": float,
+        "target_distance_m": float,
         "dead_zone_height_percent": float,
+        "smooth_yaw": bool,
+        "yaw_alpha": float,
+        "smooth_forward": bool,
+        "forward_alpha": float,
         "takeoff_altitude": float,
     }
 
@@ -234,12 +258,17 @@ class _WebHandler(BaseHTTPRequestHandler):
         except json.JSONDecodeError:
             self.send_error(400, "Invalid JSON")
             return
+        # Fields where 0/null means None (disabled)
+        _NULLABLE_FIELDS = {"target_distance_m"}
         for key, value in payload.items():
             if key not in self._CONFIG_FIELDS:
                 continue
             expected = self._CONFIG_FIELDS[key]
             try:
-                setattr(cfg, key, expected(value))
+                if key in _NULLABLE_FIELDS and (value is None or value == 0):
+                    setattr(cfg, key, None)
+                else:
+                    setattr(cfg, key, expected(value))
             except (TypeError, ValueError):
                 continue
         data = {k: getattr(cfg, k) for k in self._CONFIG_FIELDS}

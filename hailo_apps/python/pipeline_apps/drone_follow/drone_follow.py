@@ -259,8 +259,14 @@ def _add_drone_follow_args(parser):
                        help="Mock detections + real drone (Gazebo)")
     group.add_argument("--target-bbox-height", type=float, default=defaults.target_bbox_height,
                        help="Target bbox height (0-1). When --reference-altitude is set, this is the value at that altitude.")
+    group.add_argument("--target-distance", type=float, default=defaults.target_distance_m, metavar="M",
+                       help="Desired horizontal distance to person in metres. Overrides --target-bbox-height "
+                            "by computing the expected bbox height from altitude + distance geometry.")
+    group.add_argument("--person-height", type=float, default=defaults.person_height_m, metavar="M",
+                       help=f"Assumed person height for distance calculation (default: {defaults.person_height_m}m)")
     group.add_argument("--reference-altitude", type=float, default=defaults.reference_altitude_m, metavar="M",
-                       help="Reference altitude in metres for target bbox. At this altitude we use --target-bbox-height; at other altitudes target scales inversely. Set to 0 to disable (default: 3)")
+                       help="Reference altitude in metres for target bbox. At this altitude we use --target-bbox-height; "
+                            "at other altitudes target scales inversely. Ignored when --target-distance is set. (default: 3)")
     group.add_argument("--dead-zone-height-percent", type=float, default=defaults.dead_zone_height_percent,
                        help="Forward dead zone as %% of target bbox height (default: 5)")
     group.add_argument("--yaw-gain", dest="kp_yaw", type=float, default=defaults.kp_yaw)
@@ -294,6 +300,12 @@ def _add_drone_follow_args(parser):
     group.add_argument("--tracking-lost-timeout", type=float, default=2.0,
                        help="Seconds to keep following a track ID after target leaves frame (looser tracking)")
     group.add_argument("--control-loop-hz", type=float, default=defaults.control_loop_hz)
+    group.add_argument("--smooth-forward", action=argparse.BooleanOptionalAction, default=defaults.smooth_forward,
+                       help=f"Enable/disable forward velocity smoothing (default: {defaults.smooth_forward})")
+    group.add_argument("--forward-alpha", type=float, default=defaults.forward_alpha,
+                       help=f"EMA smoothing factor for forward velocity (0=sluggish, 1=no smoothing, default: {defaults.forward_alpha})")
+    group.add_argument("--kd-forward", type=float, default=defaults.kd_forward,
+                       help=f"Derivative gain: anticipate person approach/recede (default: {defaults.kd_forward})")
     group.add_argument("--follow-server-port", type=int, default=8080,
                        help="HTTP server port for target selection (only with --enable-tracking)")
     

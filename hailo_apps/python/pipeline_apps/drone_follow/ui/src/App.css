@@ -18,12 +18,35 @@ body {
   padding: 12px;
 }
 
+.main-layout {
+  display: flex;
+  gap: 10px;
+  width: 100%;
+  max-width: 1440px;
+}
+
+.side-panel {
+  width: 360px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.video-column {
+  flex: 1;
+  min-width: 0;
+}
+
+.side-card {
+  margin-bottom: 0;
+}
+
 .status-bar {
   display: flex;
   align-items: center;
   justify-content: space-between;
   width: 100%;
-  max-width: 1280px;
+  max-width: 1440px;
   padding: 8px 16px;
   margin-bottom: 8px;
   background: #2a2a2a;
@@ -34,6 +57,14 @@ body {
 .status-text {
   font-size: 14px;
   font-weight: 600;
+}
+
+.velocity-text {
+  flex: 1;
+  margin: 0 16px;
+  color: #a8d6ff;
+  font-size: 13px;
+  text-align: center;
 }
 
 .clear-btn {
@@ -52,7 +83,6 @@ body {
 
 .video-container {
   position: relative;
-  max-width: 1280px;
   width: 100%;
   background: #000;
   border-radius: 6px;
@@ -76,12 +106,17 @@ body {
 /* Controls panel */
 .controls-panel {
   width: 100%;
-  max-width: 1280px;
-  margin-bottom: 8px;
   background: #2a2a2a;
   border: 1px solid #3a3a3a;
   border-radius: 6px;
   overflow: hidden;
+}
+
+.controls-header {
+  padding: 8px 16px;
+  border-bottom: 1px solid #3a3a3a;
+  font-size: 13px;
+  font-weight: 600;
 }
 
 .controls-toggle {
@@ -115,7 +150,7 @@ body {
 }
 
 .control-label {
-  width: 120px;
+  width: 110px;
   flex-shrink: 0;
   font-size: 13px;
 }
@@ -126,7 +161,7 @@ body {
 }
 
 .control-value {
-  width: 70px;
+  width: 64px;
   flex-shrink: 0;
   text-align: right;
   font-size: 13px;
@@ -165,8 +200,6 @@ body {
 /* Logs panel */
 .logs-panel {
   width: 100%;
-  max-width: 1280px;
-  margin-bottom: 8px;
   background: #2a2a2a;
   border: 1px solid #3a3a3a;
   border-radius: 6px;

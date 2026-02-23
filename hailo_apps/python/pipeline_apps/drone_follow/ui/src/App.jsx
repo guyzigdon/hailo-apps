@@ -7,9 +7,9 @@ const DEBOUNCE_MS = 250;
 export default function App() {
   const [detections, setDetections] = useState([]);
   const [followingId, setFollowingId] = useState(null);
+  const [velocity, setVelocity] = useState(null);
   const [videoDims, setVideoDims] = useState({ width: 0, height: 0 });
-  const [controlsOpen, setControlsOpen] = useState(false);
-  const [logsOpen, setLogsOpen] = useState(false);
+  const [logsOpen, setLogsOpen] = useState(true);
   const [logs, setLogs] = useState([]);
   const [config, setConfig] = useState(null);
   const imgRef = useRef(null);
@@ -28,6 +28,7 @@ export default function App() {
             const data = await res.json();
             setDetections(data.detections || []);
             setFollowingId(data.following_id);
+            setVelocity(data.velocity || null);
           }
         } catch {
           // server not ready
@@ -171,131 +172,154 @@ export default function App() {
             ? `Following: ID ${followingId}`
             : "Auto (largest person)"}
         </span>
+        {velocity && (
+          <span className="velocity-text">
+            {velocity.mode} | Fwd {velocity.forward_m_s.toFixed(2)} m/s | Down{" "}
+            {velocity.down_m_s.toFixed(2)} m/s | Yaw{" "}
+            {velocity.yawspeed_deg_s.toFixed(1)} deg/s
+          </span>
+        )}
         <button className="clear-btn" onClick={handleClear}>
           Clear Target
         </button>
       </div>
 
-      {config && (
-        <div className="controls-panel">
-          <button
-            className="controls-toggle"
-            onClick={() => setControlsOpen((o) => !o)}
-          >
-            Controls {controlsOpen ? "\u25B2" : "\u25BC"}
-          </button>
-          {controlsOpen && (
-            <div className="controls-body">
-              <label className="control-row">
-                <span className="control-label">Yaw Gain</span>
-                <input
-                  type="range"
-                  min="0"
-                  max="10"
-                  step="0.1"
-                  value={config.kp_yaw}
-                  onChange={(e) => onSlider("kp_yaw", e.target.value)}
-                />
-                <span className="control-value">{config.kp_yaw.toFixed(1)}</span>
-              </label>
-              <label className={`control-row${config.yaw_only ? " disabled" : ""}`}>
-                <span className="control-label">Forward Gain</span>
-                <input
-                  type="range"
-                  min="0"
-                  max="10"
-                  step="0.1"
-                  value={config.kp_forward}
-                  disabled={config.yaw_only}
-                  onChange={(e) => onSlider("kp_forward", e.target.value)}
-                />
-                <span className="control-value">
-                  {config.kp_forward.toFixed(1)}
-                </span>
-              </label>
-              <label className={`control-row${config.yaw_only ? " disabled" : ""}`}>
-                <span className="control-label">Max Forward</span>
-                <input
-                  type="range"
-                  min="0"
-                  max="5"
-                  step="0.1"
-                  value={config.max_forward}
-                  disabled={config.yaw_only}
-                  onChange={(e) => onSlider("max_forward", e.target.value)}
-                />
-                <span className="control-value">
-                  {config.max_forward.toFixed(1)} m/s
-                </span>
-              </label>
-              <label className={`control-row${config.yaw_only ? " disabled" : ""}`}>
-                <span className="control-label">Max Backward</span>
-                <input
-                  type="range"
-                  min="0"
-                  max="5"
-                  step="0.1"
-                  value={config.max_backward}
-                  disabled={config.yaw_only}
-                  onChange={(e) => onSlider("max_backward", e.target.value)}
-                />
-                <span className="control-value">
-                  {config.max_backward.toFixed(1)} m/s
-                </span>
-              </label>
-              <label className="control-row">
-                <span className="control-label">Yaw Only</span>
-                <div className="toggle-wrapper">
-                  <button
-                    className={`toggle-btn ${config.yaw_only ? "toggle-on" : ""}`}
-                    onClick={() => onToggle("yaw_only")}
-                  >
-                    {config.yaw_only ? "ON" : "OFF"}
-                  </button>
-                </div>
-              </label>
-              <label className="control-row">
-                <span className="control-label">Fixed Altitude</span>
-                <div className="toggle-wrapper">
-                  <button
-                    className={`toggle-btn ${config.fixed_altitude ? "toggle-on" : ""}`}
-                    onClick={() => onToggle("fixed_altitude")}
-                  >
-                    {config.fixed_altitude ? "ON" : "OFF"}
-                  </button>
-                </div>
-              </label>
-              <label className="control-row">
-                <span className="control-label">Target BBox Height</span>
-                <input
-                  type="range"
-                  min="0.05"
-                  max="0.9"
-                  step="0.05"
-                  value={config.target_bbox_height}
-                  onChange={(e) => onSlider("target_bbox_height", e.target.value)}
-                />
-                <span className="control-value">
-                  {config.target_bbox_height.toFixed(2)}
-                </span>
-              </label>
-              <label className="control-row">
-                <span className="control-label">Dead Zone %</span>
-                <input
-                  type="range"
-                  min="0"
-                  max="30"
-                  step="1"
-                  value={config.dead_zone_height_percent}
-                  onChange={(e) =>
-                    onSlider("dead_zone_height_percent", e.target.value)
-                  }
-                />
-                <span className="control-value">
-                  {config.dead_zone_height_percent.toFixed(0)}%
-                </span>
-              </label>
-              {config.fixed_altitude && (
+      <div className="main-layout">
+        <div className="side-panel">
+          {config && (
+            <div className="controls-panel side-card">
+              <div className="controls-header">Controls</div>
+              <div className="controls-body">
+                <label className="control-row">
+                  <span className="control-label">KP Yaw</span>
+                  <input
+                    type="range"
+                    min="0"
+                    max="10"
+                    step="0.1"
+                    value={config.kp_yaw}
+                    onChange={(e) => onSlider("kp_yaw", e.target.value)}
+                  />
+                  <span className="control-value">{config.kp_yaw.toFixed(1)}</span>
+                </label>
+                <label className="control-row">
+                  <span className="control-label">Yaw Smooth</span>
+                  <div className="toggle-wrapper">
+                    <button
+                      className={`toggle-btn ${config.smooth_yaw ? "toggle-on" : ""}`}
+                      onClick={() => onToggle("smooth_yaw")}
+                    >
+                      {config.smooth_yaw ? "ON" : "OFF"}
+                    </button>
+                  </div>
+                </label>
+                <label className="control-row">
+                  <span className="control-label">Yaw Alpha</span>
+                  <input
+                    type="range"
+                    min="0.05"
+                    max="1.0"
+                    step="0.05"
+                    value={config.yaw_alpha}
+                    onChange={(e) => onSlider("yaw_alpha", e.target.value)}
+                  />
+                  <span className="control-value">{config.yaw_alpha.toFixed(2)}</span>
+                </label>
+                <label className={`control-row${config.yaw_only ? " disabled" : ""}`}>
+                  <span className="control-label">KP Forward</span>
+                  <input
+                    type="range"
+                    min="0"
+                    max="10"
+                    step="0.1"
+                    value={config.kp_forward}
+                    disabled={config.yaw_only}
+                    onChange={(e) => onSlider("kp_forward", e.target.value)}
+                  />
+                  <span className="control-value">{config.kp_forward.toFixed(1)}</span>
+                </label>
+                <label className={`control-row${config.yaw_only ? " disabled" : ""}`}>
+                  <span className="control-label">KP Backward</span>
+                  <input
+                    type="range"
+                    min="0"
+                    max="10"
+                    step="0.1"
+                    value={config.kp_backward}
+                    disabled={config.yaw_only}
+                    onChange={(e) => onSlider("kp_backward", e.target.value)}
+                  />
+                  <span className="control-value">{config.kp_backward.toFixed(1)}</span>
+                </label>
+                <label className={`control-row${config.yaw_only ? " disabled" : ""}`}>
+                  <span className="control-label">Fwd Smooth</span>
+                  <div className="toggle-wrapper">
+                    <button
+                      className={`toggle-btn ${config.smooth_forward ? "toggle-on" : ""}`}
+                      disabled={config.yaw_only}
+                      onClick={() => onToggle("smooth_forward")}
+                    >
+                      {config.smooth_forward ? "ON" : "OFF"}
+                    </button>
+                  </div>
+                </label>
+                <label className={`control-row${config.yaw_only ? " disabled" : ""}`}>
+                  <span className="control-label">Fwd Alpha</span>
+                  <input
+                    type="range"
+                    min="0.05"
+                    max="1.0"
+                    step="0.05"
+                    value={config.forward_alpha}
+                    disabled={config.yaw_only}
+                    onChange={(e) => onSlider("forward_alpha", e.target.value)}
+                  />
+                  <span className="control-value">{config.forward_alpha.toFixed(2)}</span>
+                </label>
+                <label className={`control-row${config.yaw_only ? " disabled" : ""}`}>
+                  <span className="control-label">Distance Target</span>
+                  <input
+                    type="range"
+                    min="0"
+                    max="30"
+                    step="0.5"
+                    value={config.target_distance_m ?? 0}
+                    disabled={config.yaw_only}
+                    onChange={(e) => {
+                      const v = parseFloat(e.target.value);
+                      const updated = { ...config, target_distance_m: v || null };
+                      setConfig(updated);
+                      postConfig({ target_distance_m: v || null });
+                    }}
+                  />
+                  <span className="control-value">
+                    {config.target_distance_m
+                      ? `${config.target_distance_m.toFixed(1)}m`
+                      : "off"}
+                  </span>
+                </label>
+                <label className="control-row">
+                  <span className="control-label">Yaw Only</span>
+                  <div className="toggle-wrapper">
+                    <button
+                      className={`toggle-btn ${config.yaw_only ? "toggle-on" : ""}`}
+                      onClick={() => onToggle("yaw_only")}
+                    >
+                      {config.yaw_only ? "ON" : "OFF"}
+                    </button>
+                  </div>
+                </label>
+                <label className="control-row">
+                  <span className="control-label">Fixed Alt</span>
+                  <div className="toggle-wrapper">
+                    <button
+                      className={`toggle-btn ${config.fixed_altitude ? "toggle-on" : ""}`}
+                      onClick={() => onToggle("fixed_altitude")}
+                    >
+                      {config.fixed_altitude ? "ON" : "OFF"}
+                    </button>
+                  </div>
+                </label>
                 <label className="control-row">
                   <span className="control-label">Takeoff Alt</span>
                   <input
@@ -306,36 +330,34 @@ export default function App() {
                     value={config.takeoff_altitude}
                     onChange={(e) => onSlider("takeoff_altitude", e.target.value)}
                   />
-                  <span className="control-value">
-                    {config.takeoff_altitude.toFixed(1)} m
-                  </span>
+                  <span className="control-value">{config.takeoff_altitude.toFixed(1)}m</span>
                 </label>
-              )}
+              </div>
             </div>
           )}
-        </div>
-      )}
 
-      <div className="logs-panel">
-        <button
-          className="controls-toggle"
-          onClick={() => setLogsOpen((o) => !o)}
-        >
-          Logs {logsOpen ? "\u25B2" : "\u25BC"}
-        </button>
-        {logsOpen && (
-          <div className="logs-body">
-            {logs.map((entry) => (
-              <div key={entry.id} className="log-line">
-                {entry.msg}
+          <div className="logs-panel side-card">
+            <button
+              className="controls-toggle"
+              onClick={() => setLogsOpen((o) => !o)}
+            >
+              Logs {logsOpen ? "\u25B2" : "\u25BC"}
+            </button>
+            {logsOpen && (
+              <div className="logs-body">
+                {logs.map((entry) => (
+                  <div key={entry.id} className="log-line">
+                    {entry.msg}
+                  </div>
+                ))}
+                <div ref={logEndRef} />
               </div>
-            ))}
-            <div ref={logEndRef} />
+            )}
           </div>
-        )}
-      </div>
+        </div>
 
-      <div className="video-container">
+        <div className="video-column">
+          <div className="video-container">
         <img
           ref={imgRef}
           className="video-feed"
@@ -389,6 +411,8 @@ export default function App() {
             })}
           </svg>
         )}
+          </div>
+        </div>
       </div>
     </div>
   );

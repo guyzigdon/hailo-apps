@@ -65,8 +65,10 @@ class ControllerConfig:
     kp_down: float = 0.08
     max_down_speed: float = 1.5
     target_bbox_height: float = 0.3
-    kp_forward: float = 6.0
-    kp_backward: float = 7.5
+    target_distance_m: Optional[float] = 8.0   # desired horizontal distance; overrides target_bbox_height when set
+    person_height_m: float = 1.7               # assumed person height for distance calculation
+    kp_forward: float = 3.0
+    kp_backward: float = 5.0
     dead_zone_height_percent: float = 5.0  # dead zone as % of target_bbox_height (default 5%)
     max_forward: float = 2.0
     max_backward: float = 3.0
@@ -79,11 +81,18 @@ class ControllerConfig:
     yaw_only: bool = False
     reference_altitude_m: float = 3.0  # target_bbox_height is defined at this altitude; scales by (ref_alt/current_alt)
     # Bottom-of-frame backward: bbox bottom edge beyond this triggers backward
-    bottom_y_threshold: float = 0.85
+    bottom_y_threshold: float = 0.7
     # Search mode
     search_yawspeed_slow: float = 10.0  # yaw speed during search (slower than tracking)
     search_vel_damp: float = 0.3        # dampening factor for forward/backward speed during search
     min_search_forward: float = 0.2     # minimum forward speed in search when last bbox was too small
+    # Yaw smoothing
+    smooth_yaw: bool = True             # enable low-pass smoothing on yaw command
+    yaw_alpha: float = 0.3              # yaw EMA factor (0=very smooth, 1=no smoothing)
+    # Forward smoothing: estimate person velocity and smooth commands
+    smooth_forward: bool = True         # enable forward velocity smoothing
+    forward_alpha: float = 0.1          # EMA smoothing factor (0=ignore new, 1=no smoothing)
+    kd_forward: float = 2.0            # derivative gain: anticipate person movement
 
     takeoff_altitude: float = 3.0
 
@@ -115,6 +124,8 @@ class ControllerConfig:
             kp_forward=float(_arg("kp_forward", "forward_gain", default=defaults.kp_forward)),
             kp_backward=_arg("kp_backward", "backward_gain", default=defaults.kp_backward),
             target_bbox_height=_arg("target_bbox_height", default=defaults.target_bbox_height),
+            target_distance_m=_arg("target_distance", "target_distance_m", default=defaults.target_distance_m),
+            person_height_m=_arg("person_height", "person_height_m", default=defaults.person_height_m),
             dead_zone_height_percent=_arg("dead_zone_height_percent", default=defaults.dead_zone_height_percent),
             reference_altitude_m=ref_alt,
             fixed_altitude=_arg("fixed_altitude", default=defaults.fixed_altitude),
@@ -127,8 +138,101 @@ class ControllerConfig:
             max_bbox_height_safety=_arg("max_bbox_height_safety", default=defaults.max_bbox_height_safety),
             search_timeout_s=_arg("search_timeout", "search_timeout_s", default=defaults.search_timeout_s),
             search_vel_damp=_arg("search_vel_damp", default=defaults.search_vel_damp),
+            smooth_yaw=_arg("smooth_yaw", default=defaults.smooth_yaw),
+            yaw_alpha=_arg("yaw_alpha", default=defaults.yaw_alpha),
+            smooth_forward=_arg("smooth_forward", default=defaults.smooth_forward),
+            forward_alpha=_arg("forward_alpha", default=defaults.forward_alpha),
+            kd_forward=_arg("kd_forward", default=defaults.kd_forward),
             takeoff_altitude=_arg("takeoff_altitude", default=defaults.takeoff_altitude),
         )
+
+# ---------------------------------------------------------------------------
+# Velocity Command API – clamps maximums & low-pass filters yaw
+# ---------------------------------------------------------------------------
+
+class VelocityCommandAPI:
+    """Wrapper around drone.offboard.set_velocity_body that enforces max
+    velocity limits and applies an exponential low-pass filter on the yaw axis.
+
+    Usage:
+        api = VelocityCommandAPI(drone, config)
+        await api.send(cmd)          # clamped + filtered
+        await api.send_zero()        # immediate zero (bypasses filter)
+    """
+
+    def __init__(self, drone, config: ControllerConfig, yaw_alpha: Optional[float] = None):
+        """
+        Args:
+            drone: MAVSDK System (or None for dry-run).
+            config: ControllerConfig used to read max_* limits.
+            yaw_alpha: Low-pass filter coefficient for yaw (0..1).
+                       Smaller = more smoothing, larger = faster response.
+        """
+        self._drone = drone
+        self._config = config
+        self._yaw_alpha = config.yaw_alpha if yaw_alpha is None else yaw_alpha
+        self._filtered_yaw: float = 0.0
+
+    async def send(self, cmd: VelocityBodyYawspeed) -> VelocityBodyYawspeed:
+        """Clamp velocity components, apply yaw low-pass filter, and send.
+
+        Returns the command that was actually sent (after clamping/filtering).
+        """
+        # Clamp each axis to configured maximums
+        forward = max(-self._config.max_backward, min(self._config.max_forward, cmd.forward_m_s))
+        right = max(-1.0, min(1.0, cmd.right_m_s))  # lateral not heavily used; keep bounded
+        down = max(-self._config.max_down_speed, min(self._config.max_down_speed, cmd.down_m_s))
+        yaw_raw = max(-self._config.max_yawspeed, min(self._config.max_yawspeed, cmd.yawspeed_deg_s))
+
+        if self._config.smooth_yaw:
+            # Low-pass filter on yaw: y[n] = alpha * x[n] + (1 - alpha) * y[n-1]
+            self._filtered_yaw = (self._yaw_alpha * yaw_raw
+                                  + (1.0 - self._yaw_alpha) * self._filtered_yaw)
+            yaw_out = self._filtered_yaw
+        else:
+            self._filtered_yaw = yaw_raw
+            yaw_out = yaw_raw
+
+        clamped = VelocityBodyYawspeed(forward, right, down, yaw_out)
+
+        if self._drone is not None:
+            await self._drone.offboard.set_velocity_body(clamped)
+
+        return clamped
+
+    async def send_zero(self) -> None:
+        """Send an immediate zero-velocity command and reset the yaw filter."""
+        self._filtered_yaw = 0.0
+        zero = VelocityBodyYawspeed(0.0, 0.0, 0.0, 0.0)
+        if self._drone is not None:
+            await self._drone.offboard.set_velocity_body(zero)
+
+    async def send_raw(self, cmd: VelocityBodyYawspeed) -> None:
+        """Send a command without clamping or filtering (for pre-offboard setpoints)."""
+        if self._drone is not None:
+            await self._drone.offboard.set_velocity_body(cmd)
+
+    def reset_filter(self) -> None:
+        """Reset the yaw low-pass filter state."""
+        self._filtered_yaw = 0.0
+
+
+def _distance_to_bbox_height(
+    altitude_m: float,
+    horizontal_distance_m: float,
+    vfov_deg: float,
+    person_height_m: float = 1.7,
+) -> float:
+    """Convert desired horizontal distance to expected normalized bbox height (0-1).
+
+    Uses perspective projection: at a given altitude and horizontal distance,
+    compute what fraction of the vertical FOV an average person occupies.
+    """
+    slant_range = math.sqrt(horizontal_distance_m ** 2 + altitude_m ** 2)
+    angular_height = 2.0 * math.atan(person_height_m / (2.0 * slant_range))
+    vfov_rad = math.radians(vfov_deg)
+    return angular_height / vfov_rad
+
 
 def _calculate_forward_speed(
     detection: Detection,
@@ -183,6 +287,62 @@ def _calculate_forward_speed(
     return forward
 
 
+class ForwardSmoother:
+    """Estimates person approach/recede velocity and smooths forward commands.
+
+    Tracks bbox_height over time to compute d(bbox_height)/dt, then uses that
+    as a derivative feed-forward term. Also applies EMA to the final forward
+    velocity to avoid big jumps.
+    """
+
+    def __init__(self):
+        self._smoothed_forward: float = 0.0
+        self._prev_bbox_h: Optional[float] = None
+        self._prev_time: Optional[float] = None
+        self._bbox_h_rate: float = 0.0  # EMA of d(bbox_height)/dt
+        self._rate_alpha: float = 0.3   # smoothing for rate estimation
+
+    def update(self, detection: Optional[Detection], raw_forward: float,
+               config: ControllerConfig) -> float:
+        """Return smoothed forward velocity."""
+        now = time.monotonic()
+
+        # Update bbox height rate estimate
+        if detection is not None and self._prev_bbox_h is not None and self._prev_time is not None:
+            dt = now - self._prev_time
+            if dt > 0.01:
+                instant_rate = (detection.bbox_height - self._prev_bbox_h) / dt
+                self._bbox_h_rate = (self._rate_alpha * instant_rate
+                                     + (1.0 - self._rate_alpha) * self._bbox_h_rate)
+        if detection is not None:
+            self._prev_bbox_h = detection.bbox_height
+            self._prev_time = now
+        elif detection is None:
+            # Lost detection: decay rate toward zero
+            self._bbox_h_rate *= 0.9
+
+        # Derivative feed-forward: positive rate means person is getting closer (bbox growing)
+        # -> we should move backward (negative forward). Negative rate -> move forward.
+        derivative_term = -config.kd_forward * self._bbox_h_rate
+
+        target_forward = raw_forward + derivative_term
+
+        # Clamp before smoothing
+        target_forward = max(-config.max_backward, min(config.max_forward, target_forward))
+
+        # EMA smoothing
+        alpha = config.forward_alpha
+        self._smoothed_forward = alpha * target_forward + (1.0 - alpha) * self._smoothed_forward
+
+        return self._smoothed_forward
+
+    def reset(self):
+        self._smoothed_forward = 0.0
+        self._prev_bbox_h = None
+        self._prev_time = None
+        self._bbox_h_rate = 0.0
+
+
 def compute_velocity_command(
     detection: Optional[Detection],
     config: ControllerConfig,
@@ -198,6 +358,9 @@ def compute_velocity_command(
     if detection is None:
         if not search_active:
             return hold_velocity if hold_velocity is not None else VelocityBodyYawspeed(0.0, 0.0, 0.0, 0.0)
+        # Always prefer true last seen side for search direction.
+        if last_detection is not None:
+            search_direction = 1.0 if last_detection.center_x > 0.5 else -1.0
         # Spin toward last seen direction with damped forward correction
         search_forward = 0.0
         if last_detection is not None:
@@ -314,6 +477,7 @@ async def mock_control_loop(drone, shared_state, config, pattern, initial_x, ini
     t0 = time.monotonic()
     circle_scale = circle_diameter_m / 10.0
     cx, cy, bh = initial_x, initial_y, config.target_bbox_height * 0.1
+    vel_api = VelocityCommandAPI(drone, config)
 
     try:
         while True:
@@ -323,7 +487,7 @@ async def mock_control_loop(drone, shared_state, config, pattern, initial_x, ini
             detection, _ = shared_state.get_latest()
 
             cmd = compute_velocity_command(detection, config)
-            await drone.offboard.set_velocity_body(cmd)
+            cmd = await vel_api.send(cmd)
 
             # Apply world movement (the person walking)
             dx, dy, dbh = 0.0, 0.0, 0.0
@@ -349,7 +513,7 @@ async def mock_control_loop(drone, shared_state, config, pattern, initial_x, ini
             await asyncio.sleep(period)
     except asyncio.CancelledError:
         try:
-            await drone.offboard.set_velocity_body(VelocityBodyYawspeed(0.0, 0.0, 0.0, 0.0))
+            await vel_api.send_zero()
         except Exception:
             pass  # connection may already be gone; main finally will do stop/land
         raise
@@ -405,11 +569,12 @@ async def run_drone(
             await _require_offboard_mode(drone)
 
         # PX4 requires setpoints to be streamed before offboard.start() (NO_SETPOINT_SET otherwise).
+        vel_api = VelocityCommandAPI(drone, config)
         setpoint_period_s = 0.05
         setpoint_duration_s = 1.5
         deadline = asyncio.get_event_loop().time() + setpoint_duration_s
         while asyncio.get_event_loop().time() < deadline and not shutdown.is_set():
-            await drone.offboard.set_velocity_body(VelocityBodyYawspeed(0.0, 0.0, 0.0, 0.0))
+            await vel_api.send_raw(VelocityBodyYawspeed(0.0, 0.0, 0.0, 0.0))
             await asyncio.sleep(setpoint_period_s)
         if shutdown.is_set():
             return
@@ -459,7 +624,7 @@ async def run_drone(
                 pass
             if offboard_started and drone is not None and manage_takeoff_landing:
                 try:
-                    await drone.offboard.set_velocity_body(VelocityBodyYawspeed(0.0, 0.0, 0.0, 0.0))
+                    await vel_api.send_zero()
                     await drone.offboard.stop()
                 except OffboardError as e:
                     print(f"[drone] Offboard stop: {e._result.result}")
@@ -536,15 +701,23 @@ def _ignore_sigint_during_landing(ignore: bool) -> None:
 # ---------------------------------------------------------------------------
 
 def _effective_target_bbox_height(
-    reference_altitude_m: float,
-    target_bbox_height: float,
+    config: ControllerConfig,
     current_altitude_m: float,
     min_altitude_m: float = 0.5,
     max_target: float = 0.9,
 ) -> float:
-    """Target bbox height from altitude: at reference_altitude we want target_bbox_height; scales inversely with altitude."""
+    """Compute effective target bbox height for the current altitude.
+
+    If target_distance_m is set, use perspective geometry to derive bbox height
+    from altitude + horizontal distance. Otherwise, scale target_bbox_height
+    inversely with altitude relative to reference_altitude_m.
+    """
     alt = max(current_altitude_m, min_altitude_m)
-    effective = (reference_altitude_m * target_bbox_height) / alt
+    if config.target_distance_m is not None and config.target_distance_m > 0:
+        return min(_distance_to_bbox_height(
+            alt, config.target_distance_m, config.vfov, config.person_height_m,
+        ), max_target)
+    effective = (config.reference_altitude_m * config.target_bbox_height) / alt
     return min(effective, max_target)
 
 
@@ -567,6 +740,8 @@ async def live_control_loop(drone, shared_state, config, shutdown, altitude_cach
     When config.reference_altitude_m is set and altitude_cache is provided, target bbox height is scaled by altitude.
     If ui_state is provided, logs are also pushed to the web UI.
     """
+    vel_api = VelocityCommandAPI(drone, config)
+
     def _log(msg):
         if ui_state is not None:
             ui_state.push_log(msg)
@@ -580,6 +755,7 @@ async def live_control_loop(drone, shared_state, config, shutdown, altitude_cach
     _prev_takeoff_alt = config.takeoff_altitude
     _goto_altitude = None
     _prev_cmd: Optional[VelocityBodyYawspeed] = None
+    _fwd_smoother = ForwardSmoother()
 
     # Constants
     _GOTO_KP = 0.5
@@ -603,9 +779,8 @@ async def live_control_loop(drone, shared_state, config, shutdown, altitude_cach
                 else:
                     last_detection_time = time.monotonic()
                     last_valid_detection = detection
-                    # Only update direction if detection is confident (away from center noise)
-                    if abs(detection.center_x - 0.5) > 0.05:
-                        search_direction = 1.0 if detection.center_x > 0.5 else -1.0
+                    # Keep side from the latest valid detection so search follows it.
+                    search_direction = 1.0 if detection.center_x > 0.5 else -1.0
 
             # Check search timeout
             time_since_detection = time.monotonic() - last_detection_time
@@ -621,12 +796,8 @@ async def live_control_loop(drone, shared_state, config, shutdown, altitude_cach
                 _prev_takeoff_alt = config.takeoff_altitude
 
             target_override = None
-            if config.reference_altitude_m is not None and altitude_cache and altitude_cache.get("m") is not None:
-                target_override = _effective_target_bbox_height(
-                    config.reference_altitude_m,
-                    config.target_bbox_height,
-                    altitude_cache["m"],
-                )
+            if altitude_cache and altitude_cache.get("m") is not None:
+                target_override = _effective_target_bbox_height(config, altitude_cache["m"])
             cmd = compute_velocity_command(
                 detection, config,
                 target_bbox_height_override=target_override,
@@ -635,6 +806,11 @@ async def live_control_loop(drone, shared_state, config, shutdown, altitude_cach
                 search_active=(time_since_detection >= config.search_enter_delay_s),
                 hold_velocity=_prev_cmd,
             )
+
+            # Apply forward smoothing: estimate person velocity + EMA
+            if config.smooth_forward:
+                smoothed_fwd = _fwd_smoother.update(detection, cmd.forward_m_s, config)
+                cmd = VelocityBodyYawspeed(smoothed_fwd, cmd.right_m_s, cmd.down_m_s, cmd.yawspeed_deg_s)
 
             # Override vertical velocity when going to a new altitude
             if _goto_altitude is not None and altitude_cache.get("m") is not None:
@@ -660,13 +836,15 @@ async def live_control_loop(drone, shared_state, config, shutdown, altitude_cach
                      f"bottom={e.get('bottom_backward', 0):+.2f} final={e.get('final_forward', 0):+.2f}")
                 _last_fwd_log_time = now
 
-            if drone is not None:
-                await drone.offboard.set_velocity_body(cmd)
-            else:
+            cmd = await vel_api.send(cmd)
+            if drone is None:
                 tag = "TRACK" if detection is not None else "SEARCH"
                 print(f"\r[{tag}] Yaw:{cmd.yawspeed_deg_s:+6.1f}\u00b0/s  "
                       f"Fwd:{cmd.forward_m_s:+5.2f}m/s  "
                       f"Down:{cmd.down_m_s:+5.2f}m/s", end="")
+            if ui_state is not None:
+                mode = "TRACK" if detection is not None else ("SEARCH" if time_since_detection >= config.search_enter_delay_s else "SEARCH-WAIT")
+                ui_state.update_velocity(cmd.forward_m_s, cmd.down_m_s, cmd.yawspeed_deg_s, mode)
             _prev_cmd = cmd
 
             # Periodic status log to UI
@@ -686,12 +864,10 @@ async def live_control_loop(drone, shared_state, config, shutdown, altitude_cach
 
             await asyncio.sleep(period)
     except asyncio.CancelledError:
-        if drone is not None:
-            try:
-                await drone.offboard.set_velocity_body(
-                    VelocityBodyYawspeed(0.0, 0.0, 0.0, 0.0))
-            except Exception:
-                pass
+        try:
+            await vel_api.send_zero()
+        except Exception:
+            pass
         raise
 
 
@@ -746,13 +922,14 @@ async def run_live_drone(args, shared_state, shutdown, shutdown_read_fd=None, ta
 
         # PX4 requires setpoints to be streamed before offboard.start() (NO_SETPOINT_SET otherwise).
         # Stream zero setpoint at ~20 Hz.
+        vel_api = VelocityCommandAPI(drone, config)
         setpoint_period_s = 0.05
-        
+
         # Initial stream of setpoints
         for _ in range(int(2.0 / setpoint_period_s)):
             if shutdown.is_set():
                 return
-            await drone.offboard.set_velocity_body(VelocityBodyYawspeed(0.0, 0.0, 0.0, 0.0))
+            await vel_api.send_raw(VelocityBodyYawspeed(0.0, 0.0, 0.0, 0.0))
             await asyncio.sleep(setpoint_period_s)
 
         # Try to start offboard mode, with retry
@@ -769,7 +946,7 @@ async def run_live_drone(args, shared_state, shutdown, shutdown_read_fd=None, ta
                 for _ in range(int(1.0 / setpoint_period_s)):
                     if shutdown.is_set():
                         return
-                    await drone.offboard.set_velocity_body(VelocityBodyYawspeed(0.0, 0.0, 0.0, 0.0))
+                    await vel_api.send_raw(VelocityBodyYawspeed(0.0, 0.0, 0.0, 0.0))
                     await asyncio.sleep(setpoint_period_s)
         offboard_started = True
         if manage_takeoff_landing:
@@ -819,8 +996,7 @@ async def run_live_drone(args, shared_state, shutdown, shutdown_read_fd=None, ta
                     pass
             if offboard_started and drone is not None and manage_takeoff_landing:
                 try:
-                    await drone.offboard.set_velocity_body(
-                        VelocityBodyYawspeed(0.0, 0.0, 0.0, 0.0))
+                    await vel_api.send_zero()
                     await drone.offboard.stop()
                 except OffboardError as e:
                     _print_connection_error("[drone] Offboard stop", e, hint=False)
