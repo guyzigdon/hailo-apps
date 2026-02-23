@@ -19,12 +19,15 @@ Architecture:
 """
 
 import json
+import logging
 import os
 import threading
 import time
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Optional
+
+LOGGER = logging.getLogger("drone_follow.web_server")
 
 
 class SharedUIState:
@@ -56,7 +59,6 @@ class SharedUIState:
         """Called from appsink callback with pre-encoded JPEG bytes."""
         with self._lock:
             self._frame_jpeg = jpeg_bytes
-        # Wake up all MJPEG waiters
         self._frame_event.set()
         self._frame_event.clear()
 
@@ -81,7 +83,10 @@ class SharedUIState:
             }
 
     def push_log(self, message: str):
-        """Append a log message (thread-safe). Also prints to console."""
+        """Append a log message to the UI log buffer (thread-safe).
+
+        The caller is responsible for also logging via LOGGER if desired.
+        """
         with self._lock:
             self._log_counter += 1
             self._logs.append({
@@ -89,7 +94,6 @@ class SharedUIState:
                 "ts": time.time(),
                 "msg": message,
             })
-        print(message, flush=True)
 
     def get_logs(self, since_id: int = 0) -> list:
         """Return log entries with id > since_id."""
@@ -106,20 +110,33 @@ class SharedUIState:
 class _WebHandler(BaseHTTPRequestHandler):
     """HTTP handler for the drone-follow UI."""
 
-    # Class-level references set by WebServer before serving
     ui_state: SharedUIState = None
-    target_state = None  # FollowTargetState
-    shared_state = None  # SharedDetectionState
+    target_state = None   # FollowTargetState
+    shared_state = None   # SharedDetectionState
     controller_config = None  # ControllerConfig
     static_dir: str = None
 
     def log_message(self, format, *args):
-        pass  # Suppress default stderr logging
+        pass
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
 
     def _cors_headers(self):
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
+
+    def _send_json(self, data, status=200):
+        """Send a JSON response with CORS headers."""
+        body = json.dumps(data).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self._cors_headers()
+        self.end_headers()
+        self.wfile.write(body)
 
     def do_OPTIONS(self):
         self.send_response(200)
@@ -171,14 +188,7 @@ class _WebHandler(BaseHTTPRequestHandler):
             pass
 
     def _handle_detections(self):
-        data = self.ui_state.get_detections()
-        body = json.dumps(data).encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self._cors_headers()
-        self.end_headers()
-        self.wfile.write(body)
+        self._send_json(self.ui_state.get_detections())
 
     def _handle_status(self):
         status = {}
@@ -186,15 +196,8 @@ class _WebHandler(BaseHTTPRequestHandler):
             status = self.target_state.get_status()
         if self.shared_state is not None:
             status["available_ids"] = list(self.shared_state.get_available_ids())
-        body = json.dumps(status).encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self._cors_headers()
-        self.end_headers()
-        self.wfile.write(body)
+        self._send_json(status)
 
-    # Exposed controller config fields and their types
     _CONFIG_FIELDS = {
         "kp_yaw": float,
         "kp_forward": float,
@@ -217,14 +220,7 @@ class _WebHandler(BaseHTTPRequestHandler):
         if cfg is None:
             self.send_error(404, "No controller config available")
             return
-        data = {k: getattr(cfg, k) for k in self._CONFIG_FIELDS}
-        body = json.dumps(data).encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self._cors_headers()
-        self.end_headers()
-        self.wfile.write(body)
+        self._send_json({k: getattr(cfg, k) for k in self._CONFIG_FIELDS})
 
     def _handle_logs(self):
         """Return log entries newer than ?since_id=N."""
@@ -237,14 +233,7 @@ class _WebHandler(BaseHTTPRequestHandler):
                         since_id = int(part.split("=", 1)[1])
                     except ValueError:
                         pass
-        logs = self.ui_state.get_logs(since_id)
-        body = json.dumps({"logs": logs}).encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self._cors_headers()
-        self.end_headers()
-        self.wfile.write(body)
+        self._send_json({"logs": self.ui_state.get_logs(since_id)})
 
     def _handle_post_config(self):
         cfg = self.controller_config
@@ -258,27 +247,29 @@ class _WebHandler(BaseHTTPRequestHandler):
         except json.JSONDecodeError:
             self.send_error(400, "Invalid JSON")
             return
-        # Fields where 0/null means None (disabled)
         _NULLABLE_FIELDS = {"target_distance_m"}
+        changed_keys = {}
         for key, value in payload.items():
             if key not in self._CONFIG_FIELDS:
                 continue
             expected = self._CONFIG_FIELDS[key]
             try:
+                changed_keys[key] = getattr(cfg, key)
                 if key in _NULLABLE_FIELDS and (value is None or value == 0):
                     setattr(cfg, key, None)
                 else:
                     setattr(cfg, key, expected(value))
             except (TypeError, ValueError):
+                changed_keys.pop(key, None)
                 continue
-        data = {k: getattr(cfg, k) for k in self._CONFIG_FIELDS}
-        body = json.dumps(data).encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self._cors_headers()
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            cfg.validate()
+        except ValueError as e:
+            for k, old_val in changed_keys.items():
+                setattr(cfg, k, old_val)
+            self._send_json({"error": str(e)}, status=400)
+            return
+        self._send_json({k: getattr(cfg, k) for k in self._CONFIG_FIELDS})
 
     def _handle_static(self):
         """Serve React static build with SPA fallback to index.html."""
@@ -286,14 +277,11 @@ class _WebHandler(BaseHTTPRequestHandler):
             self.send_error(404, "UI not built. Run: cd ui && npm install && npm run build")
             return
 
-        # Map URL path to file path
         path = self.path.lstrip("/")
         if not path:
             path = "index.html"
 
         file_path = os.path.join(self.static_dir, path)
-
-        # SPA fallback: if file doesn't exist, serve index.html
         if not os.path.isfile(file_path):
             file_path = os.path.join(self.static_dir, "index.html")
 
@@ -301,7 +289,6 @@ class _WebHandler(BaseHTTPRequestHandler):
             self.send_error(404, "UI not built. Run: cd ui && npm install && npm run build")
             return
 
-        # Determine content type
         content_type = self._guess_content_type(file_path)
         with open(file_path, "rb") as f:
             body = f.read()
@@ -354,47 +341,29 @@ class _WebHandler(BaseHTTPRequestHandler):
         if self.shared_state is not None:
             available = self.shared_state.get_available_ids()
             if detection_id not in available:
-                body = json.dumps({
+                self._send_json({
                     "status": "error",
                     "message": f"ID {detection_id} not in frame",
                     "available_ids": list(available),
-                }).encode()
-                self.send_response(404)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(body)))
-                self._cors_headers()
-                self.end_headers()
-                self.wfile.write(body)
+                }, status=404)
                 return
 
         if self.target_state is not None:
             self.target_state.set_target(detection_id)
 
-        body = json.dumps({"status": "success", "following_id": detection_id}).encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self._cors_headers()
-        self.end_headers()
-        self.wfile.write(body)
-        print(f"[ui-server] Now following ID: {detection_id}")
+        self._send_json({"status": "success", "following_id": detection_id})
+        LOGGER.info("Now following ID: %d", detection_id)
 
     def _handle_follow_clear(self):
         if self.target_state is not None:
             self.target_state.set_target(None)
 
-        body = json.dumps({
+        self._send_json({
             "status": "success",
             "following_id": None,
             "message": "Cleared target, following largest person",
-        }).encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self._cors_headers()
-        self.end_headers()
-        self.wfile.write(body)
-        print("[ui-server] Cleared target, following largest person")
+        })
+        LOGGER.info("Cleared target, following largest person")
 
 
 class WebServer:
@@ -422,9 +391,9 @@ class WebServer:
         self.server = ThreadingHTTPServer((self.host, self.port), _WebHandler)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
-        print(f"[ui-server] Started on http://{self.host}:{self.port}")
+        LOGGER.info("Started on http://%s:%d", self.host, self.port)
 
     def stop(self):
         if self.server:
             self.server.shutdown()
-            print("[ui-server] Stopped")
+            LOGGER.info("Stopped")

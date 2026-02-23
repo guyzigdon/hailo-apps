@@ -23,11 +23,14 @@ Example:
     curl http://localhost:8080/status
 """
 
+import json
+import logging
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
-import json
 from typing import Optional
+
+LOGGER = logging.getLogger("drone_follow.follow_server")
 
 
 class FollowTargetState:
@@ -67,100 +70,59 @@ class FollowTargetState:
 class FollowServerHandler(BaseHTTPRequestHandler):
     """HTTP request handler for follow server."""
     
-    # Class variables to hold shared state
     target_state: FollowTargetState = None
     shared_state: 'SharedDetectionState' = None
 
     def log_message(self, format, *args):
-        """Override to customize logging."""
-        print(f"[follow-server] {format % args}")
+        LOGGER.debug(format, *args)
+
+    def _send_json(self, data, status=200):
+        body = json.dumps(data).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
     def do_POST(self):
-        """Handle POST requests."""
-        if self.path == "/follow/clear" or self.path == "/follow/":
-            # Clear target, return to following biggest person
+        if self.path in ("/follow/clear", "/follow/"):
             self.target_state.set_target(None)
-            
-            response = {
+            self._send_json({
                 "status": "success",
                 "following_id": None,
-                "message": "Cleared target, now following largest person"
-            }
-            
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write(json.dumps(response).encode())
-            
-            print(f"[follow-server] Cleared target, now following largest person")
+                "message": "Cleared target, now following largest person",
+            })
+            LOGGER.info("Cleared target, now following largest person")
         elif self.path.startswith("/follow/"):
             try:
-                detection_id_str = self.path.split("/follow/")[1]
-                detection_id = int(detection_id_str)
-                
-                # Check if the detection ID is currently in the frame
-                if self.shared_state is not None:
-                    available_ids = self.shared_state.get_available_ids()
-                    if detection_id not in available_ids:
-                        self.send_response(404)
-                        self.send_header("Content-Type", "application/json")
-                        self.end_headers()
-                        error_response = {
-                            "status": "error",
-                            "message": f"Detection ID {detection_id} not found in current frame",
-                            "available_ids": list(available_ids)
-                        }
-                        self.wfile.write(json.dumps(error_response).encode())
-                        print(f"[follow-server] Detection ID {detection_id} not found. Available: {available_ids}")
-                        return
-                
-                self.target_state.set_target(detection_id)
-                
-                response = {
-                    "status": "success",
-                    "following_id": detection_id
-                }
-                
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.end_headers()
-                self.wfile.write(json.dumps(response).encode())
-                
-                print(f"[follow-server] Now following detection ID: {detection_id}")
+                detection_id = int(self.path.split("/follow/")[1])
             except (ValueError, IndexError) as e:
                 self.send_error(400, f"Invalid detection ID: {e}")
-        elif self.path == "/follow/clear" or self.path == "/follow/":
-            # Clear target, return to following biggest person
-            self.target_state.set_target(None)
-            
-            response = {
-                "status": "success",
-                "following_id": None,
-                "message": "Cleared target, now following largest person"
-            }
-            
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write(json.dumps(response).encode())
-            
-            print(f"[follow-server] Cleared target, now following largest person")
+                return
+
+            if self.shared_state is not None:
+                available_ids = self.shared_state.get_available_ids()
+                if detection_id not in available_ids:
+                    self._send_json({
+                        "status": "error",
+                        "message": f"Detection ID {detection_id} not found in current frame",
+                        "available_ids": list(available_ids),
+                    }, status=404)
+                    LOGGER.info("Detection ID %d not found. Available: %s", detection_id, available_ids)
+                    return
+
+            self.target_state.set_target(detection_id)
+            self._send_json({"status": "success", "following_id": detection_id})
+            LOGGER.info("Now following detection ID: %d", detection_id)
         else:
             self.send_error(404, "Not Found")
 
     def do_GET(self):
-        """Handle GET requests."""
         if self.path == "/status":
             status = self.target_state.get_status()
-            
-            # Add available IDs if shared_state is available
             if self.shared_state is not None:
                 status["available_ids"] = list(self.shared_state.get_available_ids())
-            
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write(json.dumps(status).encode())
+            self._send_json(status)
         else:
             self.send_error(404, "Not Found")
 
@@ -168,7 +130,8 @@ class FollowServerHandler(BaseHTTPRequestHandler):
 class FollowServer:
     """HTTP server for follow target selection."""
     
-    def __init__(self, target_state: FollowTargetState, shared_state: 'SharedDetectionState' = None, host: str = "0.0.0.0", port: int = 8080):
+    def __init__(self, target_state: FollowTargetState, shared_state: 'SharedDetectionState' = None,
+                 host: str = "0.0.0.0", port: int = 8080):
         self.target_state = target_state
         self.shared_state = shared_state
         self.host = host
@@ -178,20 +141,16 @@ class FollowServer:
 
     def start(self):
         """Start the HTTP server in a background thread."""
-        # Set the class variables so handlers can access them
         FollowServerHandler.target_state = self.target_state
         FollowServerHandler.shared_state = self.shared_state
         
         self.server = HTTPServer((self.host, self.port), FollowServerHandler)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
-        print(f"[follow-server] Started on http://{self.host}:{self.port}")
-        print(f"[follow-server] POST /follow/<id> to select a person to follow")
-        print(f"[follow-server] POST /follow/clear to clear target (follow biggest)")
-        print(f"[follow-server] GET /status to check current target")
+        LOGGER.info("Started on http://%s:%d", self.host, self.port)
 
     def stop(self):
         """Stop the HTTP server."""
         if self.server:
             self.server.shutdown()
-            print("[follow-server] Stopped")
+            LOGGER.info("Stopped")
