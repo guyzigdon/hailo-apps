@@ -580,9 +580,10 @@ def main():
         shutdown.set()
     threading.Thread(target=_eos_to_shutdown, daemon=True).start()
 
-    # Run pipeline in thread; start only after takeoff (non-daemon so we can join on exit)
     def run_pipeline():
         takeoff_done.wait()
+        if shutdown.is_set():
+            return
         try:
             app.run()
         except SystemExit:
@@ -593,6 +594,7 @@ def main():
     def on_signal(*_):
         if not shutdown.is_set():
             shutdown.set()
+            takeoff_done.set()
             LOGGER.warning("[drone] Ctrl+C received, shutting down...")
     try:
         loop = asyncio.new_event_loop()
@@ -611,6 +613,7 @@ def main():
     except KeyboardInterrupt:
         if not shutdown.is_set():
             shutdown.set()
+        takeoff_done.set()
         LOGGER.warning("[drone] Shutdown.")
     finally:
         if web_server is not None:
