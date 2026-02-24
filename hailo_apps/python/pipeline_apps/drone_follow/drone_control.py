@@ -146,6 +146,11 @@ class ControllerConfig:
             target_distance_val = _arg("target_distance", "target_distance_m",
                                        default=defaults.target_distance_m)
 
+        # fixed_altitude=False is incompatible with target_distance_m; fall back to bbox-height mode.
+        fixed_alt = _arg("fixed_altitude", default=defaults.fixed_altitude)
+        if not fixed_alt and target_distance_val is not None:
+            target_distance_val = None
+
         return cls(
             hfov=_arg("hfov", default=defaults.hfov),
             vfov=_arg("vfov", default=defaults.vfov),
@@ -158,7 +163,7 @@ class ControllerConfig:
             person_height_m=_arg("person_height", "person_height_m", default=defaults.person_height_m),
             dead_zone_height_percent=_arg("dead_zone_height_percent", default=defaults.dead_zone_height_percent),
             reference_altitude_m=ref_alt,
-            fixed_altitude=_arg("fixed_altitude", default=defaults.fixed_altitude),
+            fixed_altitude=fixed_alt,
             yaw_only=yaw_only,
             detection_timeout_s=_arg("detection_timeout", "detection_timeout_s", default=defaults.detection_timeout_s),
             search_enter_delay_s=_arg("search_enter_delay", "search_enter_delay_s", default=defaults.search_enter_delay_s),

@@ -252,7 +252,8 @@ def _add_drone_follow_args(parser):
     group.add_argument("--pitch-gain", dest="kp_down", type=float, default=defaults.kp_down)
 
     # Flight mode and mission lifecycle
-    group.add_argument("--fixed-altitude", action="store_true")
+    group.add_argument("--fixed-altitude", action=argparse.BooleanOptionalAction, default=defaults.fixed_altitude,
+                       help="Keep altitude fixed (default). Use --no-fixed-altitude to allow vertical following.")
     group.add_argument("--yaw-only", action="store_true",
                        help="Yaw only mode: no forward/backward or altitude movement")
     group.add_argument("--no-takeoff-landing", action="store_true",
