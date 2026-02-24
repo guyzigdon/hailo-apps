@@ -43,20 +43,11 @@
 
 ## Instructions
 
-1. Run PX4 SITL with Gazebo and x500 drone with mono camera.
-
-   **Default world:**
+1. Run PX4 SITL with Gazebo and x500 drone with mono camera:
    ```bash
    make px4_sitl gz_x500_mono_cam
    ```
-
-   **Custom SDF world (e.g. `2_person_world` from this app’s examples):**
-   ```bash
-   PX4_GZ_WORLD_PATH=/path/to/hailo-apps/hailo_apps/python/pipeline_apps/drone_follow/sdf_examples \
-   PX4_GZ_WORLD=2_person_world \
-   make px4_sitl gz_x500_mono_cam
-   ```
-   Run `make` from your PX4-Autopilot directory. Use the full path to `sdf_examples` for `PX4_GZ_WORLD_PATH` (e.g. `/home/user/hailo-apps/hailo_apps/python/pipeline_apps/drone_follow/sdf_examples`).
+   Run `make` from your PX4-Autopilot directory.
 
 2. Run QGroundControl:
    ```bash
@@ -114,23 +105,6 @@ python drone_follow.py --input udp://0.0.0.0:5600 --connection udp://0.0.0.0:145
 ```
 
 Ensure the video bridge (or PX4 video stream) and MAVLink are sent to this machine’s IP; use the same ports (5600 for video, 14560 for MAVLink) on the simulation side.
-
-### Optional: custom SDF worlds
-
-Example Gazebo worlds are in `sdf_examples/`. To use them, set `PX4_GZ_WORLD_PATH` to the full path of `sdf_examples` and `PX4_GZ_WORLD` to the world name (without `.sdf`), then run `make px4_sitl gz_x500_mono_cam` from PX4-Autopilot (see step 1 above).
-
-- **`2_person_world.sdf`** – Two walking actors at fixed start positions. Example:
-  ```bash
-  PX4_GZ_WORLD_PATH=/home/guyz/Desktop/hailo-pai/hailo-apps/hailo_apps/python/pipeline_apps/drone_follow/sdf_examples \
-  PX4_GZ_WORLD=2_person_world \
-  make px4_sitl gz_x500_mono_cam
-  ```
-- **`2_persons_diagonal.sdf`** – Two persons walking diagonally (from (-5,-5) to (5,5) and the reverse), then looping.
-- **`random_walk.sdf`** – Single actor with a long random-walk trajectory.
-
-#### Person actor model
-
-The `sdf_examples/model.sdf` and `sdf_examples/model.config` files define a walking person actor model for Gazebo. To use it, copy or symlink the `sdf_examples/` directory into your Gazebo models path (e.g. `~/.gz/models/Walking/`) or reference it directly from your world SDF.
 
 ## HTTP Control Server
 
