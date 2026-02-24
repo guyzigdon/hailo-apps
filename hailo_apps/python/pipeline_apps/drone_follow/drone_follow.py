@@ -16,6 +16,7 @@ import signal
 import threading
 import time
 
+import hailo
 import numpy as np
 
 try:
@@ -40,6 +41,8 @@ except ImportError:
 
 LOGGER = logging.getLogger("drone_follow.app")
 
+_EMPTY_DET_ARRAY = np.empty((0, 5), dtype=np.float32)
+
 
 def _configure_logging(verbosity: str) -> None:
     level = {
@@ -63,7 +66,7 @@ def _maybe_clear_target_after_lost(user_data):
     target_id = target_state.get_target()
     if target_id is None:
         return
-    last_seen = target_state._last_seen
+    last_seen = target_state.get_last_seen()
     if last_seen is None:
         target_state.set_target(None)
         return
@@ -145,7 +148,6 @@ def app_callback(element, buffer, user_data):
     2. Each returned track has input_index pointing to the matched detection
     3. Build person_by_id directly -- no cross-frame IoU re-matching needed
     """
-    import hailo
     roi = hailo.get_roi_from_buffer(buffer)
     detections = roi.get_objects_typed(hailo.HAILO_DETECTION)
     persons = [d for d in detections if d.get_label() == "person"]
@@ -155,7 +157,7 @@ def app_callback(element, buffer, user_data):
 
     if not persons:
         if user_data.byte_tracker is not None:
-            user_data.byte_tracker.update(np.empty((0, 5)))
+            user_data.byte_tracker.update(_EMPTY_DET_ARRAY)
         user_data.shared_state.update(None, available_ids=set())
         if target_state is not None:
             _maybe_clear_target_after_lost(user_data)
@@ -361,15 +363,15 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
             """Connect the MJPEG appsink's new-sample signal."""
             import gi
             gi.require_version("Gst", "1.0")
+            from gi.repository import Gst
+            self._Gst = Gst
             mjpeg_sink = self.pipeline.get_by_name("mjpeg_sink")
             if mjpeg_sink:
                 mjpeg_sink.connect("new-sample", self._on_mjpeg_sample)
 
         def _on_mjpeg_sample(self, appsink):
             """appsink callback: extract pre-encoded JPEG bytes."""
-            import gi
-            gi.require_version("Gst", "1.0")
-            from gi.repository import Gst
+            Gst = self._Gst
             sample = appsink.emit("pull-sample")
             if sample:
                 buf = sample.get_buffer()
@@ -444,9 +446,6 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
                 border_threshold=self.border_threshold,
             )
 
-            # ByteTracker runs in Python (async thread), not as a GStreamer element
-            tracker_pipeline = ""
-
             user_callback_pipeline = USER_CALLBACK_PIPELINE()
 
             # Display branch (with overlay). Only disable when user passed --no-display.
@@ -475,8 +474,6 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
             )
 
             pipeline_parts = [source_pipeline, tile_cropper_pipeline]
-            if tracker_pipeline:
-                pipeline_parts.append(tracker_pipeline)
             pipeline_parts.extend([user_callback_pipeline, output_pipeline])
 
             return ' ! '.join(pipeline_parts)
@@ -525,9 +522,7 @@ def main():
     ui_pre.add_argument("--ui-port", type=int, default=5001)
     ui_pre.add_argument("--ui-fps", type=int, default=10)
     ui_pre.add_argument("--enable-tracking", action="store_true")
-    ui_pre.add_argument("--log-verbosity", choices=["quiet", "normal", "debug"], default="normal")
     ui_pre_args, _ = ui_pre.parse_known_args()
-    _configure_logging(ui_pre_args.log_verbosity)
 
     ui_state = None
     web_server = None
@@ -555,7 +550,7 @@ def main():
     app = create_app(shared_state, target_state=target_state, eos_reached=eos_reached,
                      ui_state=ui_state, ui_fps=ui_pre_args.ui_fps)
     args = app.options_menu
-    _configure_logging(getattr(args, "log_verbosity", ui_pre_args.log_verbosity))
+    _configure_logging(getattr(args, "log_verbosity", "normal"))
     _resolve_serial_connection(args)
 
     # Create controller config once so it can be shared (and mutated via web UI)

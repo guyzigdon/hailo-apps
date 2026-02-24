@@ -58,6 +58,11 @@ class FollowTargetState:
             if self._target_id is not None:
                 self._last_seen = time.monotonic()
 
+    def get_last_seen(self) -> Optional[float]:
+        """Get the last seen timestamp (monotonic) for the current target."""
+        with self._lock:
+            return self._last_seen
+
     def get_status(self):
         """Get current status as a dict."""
         with self._lock:

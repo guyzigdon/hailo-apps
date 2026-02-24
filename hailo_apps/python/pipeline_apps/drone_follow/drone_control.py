@@ -294,8 +294,6 @@ def _calculate_forward_speed(
         bottom_backward = config.kp_backward * math.sqrt(y_excess)
         forward = min(forward, -bottom_backward)
 
-    # Clamp
-    forward = max(-config.max_backward, min(config.max_forward, forward))
     return forward
 
 
@@ -358,7 +356,6 @@ def compute_velocity_command(
     detection: Optional[Detection],
     config: ControllerConfig,
     target_bbox_height_override: Optional[float] = None,
-    search_direction: float = 1.0,
     last_detection: Optional[Detection] = None,
     search_active: bool = True,
     hold_velocity: Optional[VelocityBodyYawspeed] = None,
@@ -369,7 +366,8 @@ def compute_velocity_command(
     if detection is None:
         if not search_active:
             return hold_velocity if hold_velocity is not None else VelocityBodyYawspeed(0.0, 0.0, 0.0, 0.0)
-        # Always prefer true last seen side for search direction.
+        # Derive search direction from last seen position.
+        search_direction = 1.0
         if last_detection is not None:
             search_direction = 1.0 if last_detection.center_x > 0.5 else -1.0
         # Spin toward last seen direction with damped forward correction
@@ -600,9 +598,8 @@ async def live_control_loop(drone, shared_state, config, shutdown, altitude_cach
         if ui_state is not None:
             ui_state.push_log(msg)
 
-    period = 1.0 / max(0.1, min(config.control_loop_hz, 5.0))
+    period = 1.0 / max(0.1, config.control_loop_hz)
     last_detection_time = time.monotonic()
-    search_direction = 1.0
     last_valid_detection: Optional[Detection] = None
     _prev_takeoff_alt = config.takeoff_altitude
     _goto_altitude = None
@@ -622,20 +619,19 @@ async def live_control_loop(drone, shared_state, config, shutdown, altitude_cach
 
     try:
         while not shutdown.is_set():
+            now = time.monotonic()
             detection, _ = shared_state.get_latest()
 
             if detection is not None:
-                age = time.monotonic() - detection.timestamp
+                age = now - detection.timestamp
                 if age > config.detection_timeout_s:
                     detection = None
                 else:
-                    last_detection_time = time.monotonic()
+                    last_detection_time = now
                     last_valid_detection = detection
-                    # Keep side from the latest valid detection so search follows it.
-                    search_direction = 1.0 if detection.center_x > 0.5 else -1.0
 
             # Check search timeout
-            time_since_detection = time.monotonic() - last_detection_time
+            time_since_detection = now - last_detection_time
             if time_since_detection > config.search_timeout_s:
                 _log(f"[drone] Search timeout ({config.search_timeout_s}s) exceeded - no person found. Landing...", level=logging.WARNING)
                 shutdown.set()
@@ -653,7 +649,6 @@ async def live_control_loop(drone, shared_state, config, shutdown, altitude_cach
             cmd = compute_velocity_command(
                 detection, config,
                 target_bbox_height_override=target_override,
-                search_direction=search_direction,
                 last_detection=last_valid_detection,
                 search_active=(time_since_detection >= config.search_enter_delay_s),
                 hold_velocity=_prev_cmd,
@@ -672,8 +667,6 @@ async def live_control_loop(drone, shared_state, config, shutdown, altitude_cach
                 else:
                     down_speed = max(-_GOTO_MAX_SPEED, min(_GOTO_MAX_SPEED, -_GOTO_KP * alt_error))
                     cmd = VelocityBodyYawspeed(cmd.forward_m_s, cmd.right_m_s, down_speed, cmd.yawspeed_deg_s)
-
-            now = time.monotonic()
 
             # Forward-velocity log (throttled)
             if now - _last_fwd_log_time >= _FWD_LOG_INTERVAL and detection is not None:
@@ -754,7 +747,7 @@ async def _land_safely(drone, vel_api: VelocityCommandAPI) -> None:
     try:
         await vel_api.send_zero()
         await drone.offboard.stop()
-    except (OffboardError, Exception) as e:
+    except Exception as e:
         _print_connection_error("[drone] Offboard stop", e)
 
     LOGGER.warning("[drone] Landing safely - please wait (ignoring further Ctrl+C until done)...")
