@@ -36,11 +36,6 @@
    The built UI is served from `ui/build` when you run with `--ui`.
    Running with `--ui` without building first will exit with an error message.
 
-4. **Verify** the app runs (dry-run without Hailo or drone):
-   ```bash
-   python drone_follow.py --dry-run --mock-pattern static
-   ```
-
 ## Instructions
 
 1. Run PX4 SITL with Gazebo and x500 drone with mono camera:
@@ -62,6 +57,33 @@
    ```bash
    python drone_follow.py --input udp://0.0.0.0:5600 --target-bbox-height 0.5
    ```
+
+### Loading a custom Gazebo world
+
+Use `--px4-path` and `--world` to automatically load a custom SDF world into Gazebo.
+The app temporarily replaces PX4’s `default.sdf` with a symlink to the chosen world,
+waits for the drone to connect (meaning Gazebo has loaded), then restores the original.
+
+```bash
+python drone_follow.py \
+  --px4-path ~/Desktop/PX4-Autopilot \
+  --world 2_person_world \
+  --input udp://0.0.0.0:5600
+```
+
+Then start PX4 SITL in another terminal as usual (`make px4_sitl gz_x500_mono_cam`).
+
+`--world` accepts either a name from `sdf_examples/` (without `.sdf`) or a full path to an SDF file.
+
+Example worlds in `sdf_examples/`:
+
+- **`2_person_world`** – Two walking actors at fixed start positions.
+- **`2_persons_diagonal`** – Two persons walking diagonally toward each other, looping.
+- **`random_walk`** – Single actor with a long random-walk trajectory.
+
+#### Person actor model
+
+The walking person model is in `sdf_examples/wolking person/`. Copy or symlink it into your Gazebo models path (e.g. `~/.gz/models/Walking actor/`) so the world files can reference it.
 
 ### Running drone_follow on a different PC than the simulation
 
@@ -94,18 +116,6 @@ python drone_follow.py --input udp://0.0.0.0:5600 --connection udp://0.0.0.0:145
 ```
 
 Ensure the video bridge (or PX4 video stream) and MAVLink are sent to this machine’s IP; use the same ports (5600 for video, 14560 for MAVLink) on the simulation side.
-
-### Optional: custom SDF worlds
-
-Example Gazebo worlds are in `sdf_examples/`:
-
-- **`2_persons_diagonal.sdf`** – Two persons walking diagonally toward each other (from (-5,-5) to (5,5) and the reverse), then looping. Uses the `Walking actor` model. Load in Gazebo or pass as the world file for your PX4/Gazebo run if your setup supports it.
-- **`2_person_world.sdf`** – Two walking actors at fixed start positions.
-- **`random_walk.sdf`** – Single actor with a long random-walk trajectory.
-
-#### Person actor model
-
-The `sdf_examples/model.sdf` and `sdf_examples/model.config` files define a walking person actor model for Gazebo. To use it, copy or symlink the `sdf_examples/` directory into your Gazebo models path (e.g. `~/.gz/models/Walking/`) or reference it directly from your world SDF.
 
 ## HTTP Control Server
 

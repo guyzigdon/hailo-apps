@@ -12,9 +12,11 @@ import argparse
 import asyncio
 import logging
 import os
+import shutil
 import signal
 import threading
 import time
+from pathlib import Path
 
 import hailo
 import numpy as np
@@ -52,6 +54,80 @@ def _configure_logging(verbosity: str) -> None:
     }.get(verbosity, logging.INFO)
     logging.basicConfig(level=level, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     logging.getLogger().setLevel(level)
+
+
+# ---------------------------------------------------------------------------
+# World Loader — swap PX4 default.sdf with a custom SDF world
+# ---------------------------------------------------------------------------
+
+_SDF_EXAMPLES_DIR = Path(__file__).parent / "sdf_examples"
+_PX4_WORLD_REL = Path("Tools/simulation/gz/worlds/default.sdf")
+
+
+class WorldLoader:
+    """Context manager that symlinks a custom SDF world as PX4's default.sdf.
+
+    On enter: backs up the original default.sdf and creates a symlink.
+    restore() removes the symlink and reverts the backup (called after drone connects).
+    On exit (__exit__): ensures restore() runs even on crash.
+    """
+
+    def __init__(self, px4_path: str, world: str):
+        self._px4_path = Path(px4_path).expanduser().resolve()
+        self._default_sdf = self._px4_path / _PX4_WORLD_REL
+        self._backup_sdf = self._default_sdf.with_suffix(".sdf.bak")
+        self._restored = False
+
+        # Resolve world: bare name -> sdf_examples/<name>.sdf, otherwise treat as path
+        world_path = Path(world)
+        if not world_path.suffix:
+            world_path = _SDF_EXAMPLES_DIR / f"{world}.sdf"
+        elif not world_path.is_absolute():
+            candidate = _SDF_EXAMPLES_DIR / world_path
+            if candidate.exists():
+                world_path = candidate
+        self._world_sdf = world_path.expanduser().resolve()
+
+    def __enter__(self):
+        if not self._world_sdf.is_file():
+            raise FileNotFoundError(f"World SDF not found: {self._world_sdf}")
+        if not self._default_sdf.parent.is_dir():
+            raise FileNotFoundError(
+                f"PX4 worlds directory not found: {self._default_sdf.parent}")
+
+        # Back up existing default.sdf
+        if self._default_sdf.exists() or self._default_sdf.is_symlink():
+            if self._backup_sdf.exists():
+                self._backup_sdf.unlink()
+            shutil.copy2(str(self._default_sdf), str(self._backup_sdf))
+            self._default_sdf.unlink()
+            LOGGER.info("[world] Backed up %s", self._default_sdf)
+
+        # Create symlink
+        self._default_sdf.symlink_to(self._world_sdf)
+        LOGGER.info("[world] Symlinked %s -> %s", self._default_sdf.name, self._world_sdf.name)
+        return self
+
+    def restore(self):
+        """Remove symlink and restore original default.sdf from backup."""
+        if self._restored:
+            return
+        self._restored = True
+        try:
+            if self._default_sdf.is_symlink():
+                self._default_sdf.unlink()
+                LOGGER.info("[world] Removed symlink %s", self._default_sdf.name)
+        except OSError as e:
+            LOGGER.warning("[world] Failed to remove symlink: %s", e)
+        try:
+            if self._backup_sdf.exists():
+                shutil.move(str(self._backup_sdf), str(self._default_sdf))
+                LOGGER.info("[world] Restored original %s", self._default_sdf.name)
+        except OSError as e:
+            LOGGER.warning("[world] Failed to restore backup: %s", e)
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.restore()
 
 
 # ---------------------------------------------------------------------------
@@ -295,6 +371,15 @@ def _add_drone_follow_args(parser):
                             "Optionally specify device path (default: /dev/ttyACM0)")
     group.add_argument("--serial-baud", type=int, default=57600,
                        help="Baud rate for serial connection (default: 57600)")
+
+    # World loading
+    group.add_argument("--px4-path", default=None, metavar="DIR",
+                       help="Path to PX4-Autopilot directory. Required when using --world.")
+    group.add_argument("--world", default=None, metavar="NAME_OR_PATH",
+                       help="SDF world to load in Gazebo. Can be a name from sdf_examples/ "
+                            "(e.g. '2_person_world') or a path to an .sdf file. "
+                            "Temporarily symlinks it as default.sdf; "
+                            "restores the original after the drone connects.")
 
     # Servers/UI
     group.add_argument("--follow-server-port", type=int, default=8080,
@@ -556,6 +641,14 @@ def main():
     # Create controller config once so it can be shared (and mutated via web UI)
     controller_config = ControllerConfig.from_args(args)
 
+    # Validate --world / --px4-path pair
+    world_loader = None
+    if getattr(args, "world", None) is not None:
+        if getattr(args, "px4_path", None) is None:
+            LOGGER.error("--world requires --px4-path")
+            raise SystemExit(1)
+        world_loader = WorldLoader(args.px4_path, args.world)
+
     # Start follow server (always available)
     follow_server = FollowServer(target_state, shared_state, port=args.follow_server_port)
     follow_server.start()
@@ -592,24 +685,31 @@ def main():
             takeoff_done.set()
             LOGGER.warning("[drone] Ctrl+C received, shutting down...")
     try:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+        if world_loader is not None:
+            world_loader.__enter__()
         try:
-            for sig in (signal.SIGINT, signal.SIGTERM):
-                loop.add_signal_handler(sig, on_signal)
-        except NotImplementedError:
-            signal.signal(signal.SIGINT, on_signal)
-            if hasattr(signal, "SIGTERM"):
-                signal.signal(signal.SIGTERM, on_signal)
-        loop.run_until_complete(
-            run_live_drone(args, shared_state, shutdown,
-                          takeoff_done=takeoff_done, pipeline_quit_cb=app.loop.quit,
-                          config=controller_config, ui_state=ui_state))
-    except KeyboardInterrupt:
-        if not shutdown.is_set():
-            shutdown.set()
-        takeoff_done.set()
-        LOGGER.warning("[drone] Shutdown.")
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                for sig in (signal.SIGINT, signal.SIGTERM):
+                    loop.add_signal_handler(sig, on_signal)
+            except NotImplementedError:
+                signal.signal(signal.SIGINT, on_signal)
+                if hasattr(signal, "SIGTERM"):
+                    signal.signal(signal.SIGTERM, on_signal)
+            loop.run_until_complete(
+                run_live_drone(args, shared_state, shutdown,
+                              takeoff_done=takeoff_done, pipeline_quit_cb=app.loop.quit,
+                              config=controller_config, ui_state=ui_state,
+                              world_loader=world_loader))
+        except KeyboardInterrupt:
+            if not shutdown.is_set():
+                shutdown.set()
+            takeoff_done.set()
+            LOGGER.warning("[drone] Shutdown.")
+        finally:
+            if world_loader is not None:
+                world_loader.__exit__(None, None, None)
     finally:
         if web_server is not None:
             web_server.stop()
