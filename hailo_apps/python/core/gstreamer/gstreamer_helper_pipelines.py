@@ -100,8 +100,8 @@ def SOURCE_PIPELINE(
         video_height (int, optional): The height of the video. Defaults to 640.
         video_format (str, optional): The video format. Defaults to 'RGB'.
         name (str, optional): The prefix name for the pipeline elements. Defaults to 'source'.
-        mirror_image (bool, optional): Whether to horizontally mirror the image (for camera sources). Defaults to True.
-        v_mirror (bool, optional): Whether to vertically flip the image. Defaults to False.
+        horizontal_mirror (bool, optional): Whether to horizontally mirror the image (for camera sources). Defaults to True.
+        vertical_mirror (bool, optional): Whether to vertically flip the image. Defaults to False.
         input_codec (str, optional): Input video codec ('auto', 'h264', 'h265', 'hevc'). Defaults to 'auto'.
 
     Returns:

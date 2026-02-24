@@ -283,8 +283,8 @@ class GStreamerTilingApp(GStreamerApp):
             frame_rate=self.frame_rate,
             sync=self.sync,
             input_codec=self.input_codec,
-            mirror_image=not self.no_mirror,
-            v_mirror=self.v_mirror,
+            horizontal_mirror=not self.no_mirror,
+            vertical_mirror=self.v_mirror,
         )
 
         # Default to 0.001 if not specified (original behavior)
