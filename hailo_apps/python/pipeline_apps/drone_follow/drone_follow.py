@@ -13,6 +13,7 @@ import asyncio
 import logging
 import os
 import signal
+import sys
 import threading
 import time
 
@@ -546,6 +547,10 @@ def main():
             import sys as _sys
             _sys.argv.append("--enable-tracking")
             LOGGER.info("[ui] Auto-enabling tracking for UI mode")
+
+    # Disable horizontal mirror by default (drone cameras aren't mirrored). Pass --h-mirror to enable mirroring.
+    if "--no-mirror" not in sys.argv and "--h-mirror" not in sys.argv:
+        sys.argv.append("--no-mirror")
 
     app = create_app(shared_state, target_state=target_state, eos_reached=eos_reached,
                      ui_state=ui_state, ui_fps=ui_pre_args.ui_fps)

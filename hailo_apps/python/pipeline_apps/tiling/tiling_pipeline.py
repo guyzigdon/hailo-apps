@@ -141,6 +141,7 @@ class GStreamerTilingApp(GStreamerApp):
         # Display options
         parser.add_argument("--no-display", action="store_true", help="Disable display window (headless mode)")
         parser.add_argument("--no-mirror", action="store_true", help="Disable horizontal mirroring for camera input")
+        parser.add_argument("--h-mirror", dest="h_mirror", action="store_true", help="Enable horizontal mirroring (cancels --no-mirror)")
         parser.add_argument("--v-mirror", action="store_true", help="Enable vertical mirroring (flip image upside down)")
         parser.add_argument("--save-output", type=str, default=None, help="Save output video to file (for camera/live sources)")
         
@@ -187,7 +188,7 @@ class GStreamerTilingApp(GStreamerApp):
         self.border_threshold = self.config.border_threshold
         self.input_codec = getattr(self.options_menu, 'input_codec', 'auto')
         self.no_display = getattr(self.options_menu, 'no_display', False)
-        self.no_mirror = getattr(self.options_menu, 'no_mirror', False)
+        self.no_mirror = getattr(self.options_menu, 'no_mirror', False) and not getattr(self.options_menu, 'h_mirror', False)
         self.v_mirror = getattr(self.options_menu, 'v_mirror', False)
         self.save_output = getattr(self.options_menu, 'save_output', None)
         
