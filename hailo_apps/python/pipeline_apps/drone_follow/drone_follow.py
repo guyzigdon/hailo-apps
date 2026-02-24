@@ -414,7 +414,8 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
                 frame_rate=self.frame_rate,
                 sync=self.sync,
                 input_codec=self.input_codec,
-                mirror_image=not self.no_mirror,
+                horizontal_mirror=not self.no_mirror,
+                vertical_mirror=self.v_mirror,
             )
 
             nms_score_thresh = self.nms_score_threshold if self.nms_score_threshold is not None else 0.001
