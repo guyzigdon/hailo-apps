@@ -8,7 +8,7 @@ _root = os.path.abspath(os.path.join(os.path.dirname(__file__), *[".."] * 5))
 if _root not in sys.path:
     sys.path.insert(0, _root)
 
-# drone_follow app dir (parent of tests/) so `from drone_control import ...` resolves
+# drone_follow app dir (parent of tests/) so `from follow_api import ...` etc. resolves
 _app_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if _app_dir not in sys.path:
     sys.path.insert(0, _app_dir)

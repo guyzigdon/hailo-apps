@@ -1,6 +1,7 @@
-#!/usr/bin/env python3
-"""
-HTTP server for drone follow application.
+"""HTTP server for drone follow application.
+
+FollowTargetState now lives in follow_api.state and is re-exported here
+for backward compatibility.
 
 Provides a REST API to control which tracked person the drone should follow.
 The server is always available and provides status information.
@@ -8,12 +9,12 @@ Target selection by ID requires tracking to be enabled (--enable-tracking flag).
 
 Usage:
     The server starts automatically in all modes.
-    
+
     POST /follow/<detection_id>
         Start following the person with the specified tracking ID.
         Requires --enable-tracking to be enabled.
         Returns: {"status": "success", "following_id": <id>}
-    
+
     GET /status
         Get current tracking status.
         Returns: {"following_id": <id or null>, "last_seen": <timestamp or null>}
@@ -26,55 +27,17 @@ Example:
 import json
 import logging
 import threading
-import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from typing import Optional
+
+# Re-export from follow_api for backward compatibility
+from follow_api.state import FollowTargetState
 
 LOGGER = logging.getLogger("drone_follow.follow_server")
 
 
-class FollowTargetState:
-    """Thread-safe state for which detection ID to follow."""
-    def __init__(self):
-        self._lock = threading.Lock()
-        self._target_id: Optional[int] = None
-        self._last_seen: Optional[float] = None
-
-    def set_target(self, detection_id: Optional[int]):
-        """Set the target detection ID to follow."""
-        with self._lock:
-            self._target_id = detection_id
-            if detection_id is not None:
-                self._last_seen = time.monotonic()
-
-    def get_target(self) -> Optional[int]:
-        """Get the current target detection ID."""
-        with self._lock:
-            return self._target_id
-
-    def update_last_seen(self):
-        """Update the last seen timestamp for the current target."""
-        with self._lock:
-            if self._target_id is not None:
-                self._last_seen = time.monotonic()
-
-    def get_last_seen(self) -> Optional[float]:
-        """Get the last seen timestamp (monotonic) for the current target."""
-        with self._lock:
-            return self._last_seen
-
-    def get_status(self):
-        """Get current status as a dict."""
-        with self._lock:
-            return {
-                "following_id": self._target_id,
-                "last_seen": self._last_seen
-            }
-
-
 class FollowServerHandler(BaseHTTPRequestHandler):
     """HTTP request handler for follow server."""
-    
+
     target_state: FollowTargetState = None
     shared_state: 'SharedDetectionState' = None
 
@@ -134,7 +97,7 @@ class FollowServerHandler(BaseHTTPRequestHandler):
 
 class FollowServer:
     """HTTP server for follow target selection."""
-    
+
     def __init__(self, target_state: FollowTargetState, shared_state: 'SharedDetectionState' = None,
                  host: str = "0.0.0.0", port: int = 8080):
         self.target_state = target_state
@@ -148,7 +111,7 @@ class FollowServer:
         """Start the HTTP server in a background thread."""
         FollowServerHandler.target_state = self.target_state
         FollowServerHandler.shared_state = self.shared_state
-        
+
         self.server = HTTPServer((self.host, self.port), FollowServerHandler)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
