@@ -36,17 +36,27 @@
    The built UI is served from `ui/build` when you run with `--ui`.
    Running with `--ui` without building first will exit with an error message.
 
-4. **Verify** the app runs (dry-run without Hailo or drone):
+4. **Verify** the app parses and shows help:
    ```bash
-   python drone_follow.py --dry-run --mock-pattern static
+   python drone_follow.py --help
    ```
 
 ## Instructions
 
-1. Run PX4 SITL with Gazebo and x500 drone with mono camera:
+1. Run PX4 SITL with Gazebo and x500 drone with mono camera.
+
+   **Default world:**
    ```bash
    make px4_sitl gz_x500_mono_cam
    ```
+
+   **Custom SDF world (e.g. `2_person_world` from this app’s examples):**
+   ```bash
+   PX4_GZ_WORLD_PATH=/path/to/hailo-apps/hailo_apps/python/pipeline_apps/drone_follow/sdf_examples \
+   PX4_GZ_WORLD=2_person_world \
+   make px4_sitl gz_x500_mono_cam
+   ```
+   Run `make` from your PX4-Autopilot directory. Use the full path to `sdf_examples` for `PX4_GZ_WORLD_PATH` (e.g. `/home/user/hailo-apps/hailo_apps/python/pipeline_apps/drone_follow/sdf_examples`).
 
 2. Run QGroundControl:
    ```bash
@@ -62,6 +72,16 @@
    ```bash
    python drone_follow.py --input udp://0.0.0.0:5600 --target-bbox-height 0.5
    ```
+
+### Key options (match the app)
+
+- **Target size:** Use either `--target-bbox-height <0–1>` (target height in the image) or `--target-distance <metres>` (real-world distance). They are mutually exclusive. `--target-distance` requires `--fixed-altitude`.
+- **`--fixed-altitude`** – Hold altitude constant; use with `--target-distance` for distance-based following.
+- **`--no-takeoff-landing`** – Do not take off or land; assume the drone is already in offboard mode (e.g. when you arm and switch to offboard yourself).
+- **`--yaw-only`** – Only yaw to center the person; no forward/backward or altitude movement (see Yaw-Only Mode below).
+- **`--enable-tracking`** – Enable tracking IDs for the HTTP API and optional web UI target selection.
+- **`--ui`** – Enable web UI with live video and click-to-follow (requires UI built; see Optional – Web UI above).
+- **Input/connection:** Pipeline input is set with `--input` (e.g. `udp://0.0.0.0:5600`, `rpi`, `usb`). MAVLink connection defaults to `udpin://0.0.0.0:14540`; override with `--connection` or use `--serial` for a serial link.
 
 ### Running drone_follow on a different PC than the simulation
 
@@ -97,10 +117,15 @@ Ensure the video bridge (or PX4 video stream) and MAVLink are sent to this machi
 
 ### Optional: custom SDF worlds
 
-Example Gazebo worlds are in `sdf_examples/`:
+Example Gazebo worlds are in `sdf_examples/`. To use them, set `PX4_GZ_WORLD_PATH` to the full path of `sdf_examples` and `PX4_GZ_WORLD` to the world name (without `.sdf`), then run `make px4_sitl gz_x500_mono_cam` from PX4-Autopilot (see step 1 above).
 
-- **`2_persons_diagonal.sdf`** – Two persons walking diagonally toward each other (from (-5,-5) to (5,5) and the reverse), then looping. Uses the `Walking actor` model. Load in Gazebo or pass as the world file for your PX4/Gazebo run if your setup supports it.
-- **`2_person_world.sdf`** – Two walking actors at fixed start positions.
+- **`2_person_world.sdf`** – Two walking actors at fixed start positions. Example:
+  ```bash
+  PX4_GZ_WORLD_PATH=/home/guyz/Desktop/hailo-pai/hailo-apps/hailo_apps/python/pipeline_apps/drone_follow/sdf_examples \
+  PX4_GZ_WORLD=2_person_world \
+  make px4_sitl gz_x500_mono_cam
+  ```
+- **`2_persons_diagonal.sdf`** – Two persons walking diagonally (from (-5,-5) to (5,5) and the reverse), then looping.
 - **`random_walk.sdf`** – Single actor with a long random-walk trajectory.
 
 #### Person actor model
@@ -168,7 +193,7 @@ When running with `--enable-tracking`, you can select a specific person to follo
 
 ### Configuration
 
-- Change the server port with `--follow-server-port <port>` (default: 8080)
+- The follow server is always running. Change its port with `--follow-server-port <port>` (default: 8080).
 
 ## Yaw-Only Mode
 
