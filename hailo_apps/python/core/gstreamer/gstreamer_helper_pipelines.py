@@ -87,8 +87,8 @@ def SOURCE_PIPELINE(
     frame_rate=30,
     sync=True,
     video_format="RGB",
-    mirror_image=True,
-    v_mirror=False,
+    horizontal_mirror=True,
+    vertical_mirror=False,
     input_codec="auto",
 ):
     """Creates a GStreamer pipeline string for the video source with a separate fps caps
@@ -110,8 +110,8 @@ def SOURCE_PIPELINE(
     source_type = get_source_type(video_source)
 
     # Build videoflip element strings conditionally
-    videoflip_str = f'videoflip name=videoflip_{name} video-direction=horiz ! ' if mirror_image else ''
-    vflip_str = f'videoflip name=vflip_{name} video-direction=vert ! ' if v_mirror else ''
+    horizontal_mirror_str = f'videoflip name=videoflip_{name} video-direction=horiz ! ' if horizontal_mirror else ''
+    vertical_mirror_str = f'videoflip name=vflip_{name} video-direction=vert ! ' if vertical_mirror else ''
 
     if source_type == "usb":
         if no_webcam_compression:
@@ -119,8 +119,8 @@ def SOURCE_PIPELINE(
             source_element = (
                 f'v4l2src device={video_source} name={name} ! '
                 f'video/x-raw, width=640, height=480 ! '
-                f'{videoflip_str}'
-                f'{vflip_str}'
+                f'{horizontal_mirror_str}'
+                f'{vertical_mirror_str}'
             )
         else:
             # Use compressed format for webcam
@@ -129,38 +129,36 @@ def SOURCE_PIPELINE(
                 f'v4l2src device={video_source} name={name} ! image/jpeg, framerate=30/1, width={width}, height={height} ! '
                 f'{QUEUE(name=f"{name}_queue_decode")} ! '
                 f'decodebin name={name}_decodebin ! '
-                f'{videoflip_str}'
-                f'{vflip_str}'
+                f'{horizontal_mirror_str}'
+                f'{vertical_mirror_str}'
             )
     elif source_type == "rpi":
-        rpi_videoflip_str = "videoflip name=videoflip video-direction=horiz ! " if mirror_image else ""
-        rpi_vflip_str = "videoflip name=vflip video-direction=vert ! " if v_mirror else ""
         source_element = (
             f"appsrc name=app_source is-live=true leaky-type=downstream max-buffers=3 ! "
-            f"{rpi_videoflip_str}"
-            f"{rpi_vflip_str}"
+            f"{horizontal_mirror_str}"
+            f"{vertical_mirror_str}"
             f"video/x-raw, format={video_format}, width={video_width}, height={video_height} ! "
         )
     elif source_type == "libcamera":
         source_element = (
             f"libcamerasrc name={name} ! "
             f"video/x-raw, format={video_format}, width=1536, height=864 ! "
-            f"{videoflip_str}"
-            f"{vflip_str}"
+            f"{horizontal_mirror_str}"
+            f"{vertical_mirror_str}"
         )
     elif source_type == "ximage":
         source_element = (
             f"ximagesrc xid={video_source} ! {QUEUE(name=f'{name}queue_scale_')} ! videoscale ! "
-            f"{videoflip_str}"
-            f"{vflip_str}"
+            f"{horizontal_mirror_str}"
+            f"{vertical_mirror_str}"
         )
     elif source_type == 'rtsp':  # RTSP stream handling
         source_element = (
             f'rtspsrc location="{video_source}" name={name} ! '
             f'{QUEUE(name=f"{name}_queue_decode")} ! '
             f'decodebin name={name}_decodebin ! '
-            f'{videoflip_str}'
-            f'{vflip_str}'
+            f'{horizontal_mirror_str}'
+            f'{vertical_mirror_str}'
         )
     elif source_type == 'udp':  # UDP stream handling (e.g., Gazebo camera)
         # Extract port from udp://host:port or udp://:port
@@ -172,8 +170,8 @@ def SOURCE_PIPELINE(
             f'rtph264depay ! '
             f'h264parse ! '
             f'avdec_h264 name={name}_decodebin ! '
-            f'{videoflip_str}'
-            f'{vflip_str}'
+            f'{horizontal_mirror_str}'
+            f'{vertical_mirror_str}'
         )
     else:
         # File source handling
@@ -217,7 +215,7 @@ def SOURCE_PIPELINE(
                 f"{QUEUE(name=f'{name}_queue_decode')} ! "
                 f"decodebin name={name}_decodebin ! "
             )
-        source_element += f"{videoflip_str}{vflip_str}"
+        source_element += f"{horizontal_mirror_str}{vertical_mirror_str}"
 
     # Set up the fps caps.
     # If sync is True, constrain the rate with the given frame_rate.
