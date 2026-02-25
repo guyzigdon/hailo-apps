@@ -36,9 +36,9 @@
    The built UI is served from `ui/build` when you run with `--ui`.
    Running with `--ui` without building first will exit with an error message.
 
-4. **Verify** the app runs (dry-run without Hailo or drone):
+4. **Verify** the app parses and shows help:
    ```bash
-   python drone_follow.py --dry-run --mock-pattern static
+   python drone_follow.py --help
    ```
 
 ## Instructions
@@ -47,6 +47,7 @@
    ```bash
    make px4_sitl gz_x500_mono_cam
    ```
+   Run `make` from your PX4-Autopilot directory.
 
 2. Run QGroundControl:
    ```bash
@@ -62,6 +63,16 @@
    ```bash
    python drone_follow.py --input udp://0.0.0.0:5600 --target-bbox-height 0.5
    ```
+
+### Key options (match the app)
+
+- **Target size:** Use either `--target-bbox-height <0–1>` (target height in the image) or `--target-distance <metres>` (real-world distance). They are mutually exclusive. `--target-distance` requires `--fixed-altitude`.
+- **`--fixed-altitude`** – Hold altitude constant; use with `--target-distance` for distance-based following.
+- **`--no-takeoff-landing`** – Do not take off or land; assume the drone is already in offboard mode (e.g. when you arm and switch to offboard yourself).
+- **`--yaw-only`** – Only yaw to center the person; no forward/backward or altitude movement (see Yaw-Only Mode below).
+- **`--enable-tracking`** – Enable tracking IDs for the HTTP API and optional web UI target selection.
+- **`--ui`** – Enable web UI with live video and click-to-follow (requires UI built; see Optional – Web UI above).
+- **Input/connection:** Pipeline input is set with `--input` (e.g. `udp://0.0.0.0:5600`, `rpi`, `usb`). MAVLink connection defaults to `udpin://0.0.0.0:14540`; override with `--connection` or use `--serial` for a serial link.
 
 ### Running drone_follow on a different PC than the simulation
 
@@ -94,18 +105,6 @@ python drone_follow.py --input udp://0.0.0.0:5600 --connection udp://0.0.0.0:145
 ```
 
 Ensure the video bridge (or PX4 video stream) and MAVLink are sent to this machine’s IP; use the same ports (5600 for video, 14560 for MAVLink) on the simulation side.
-
-### Optional: custom SDF worlds
-
-Example Gazebo worlds are in `sdf_examples/`:
-
-- **`2_persons_diagonal.sdf`** – Two persons walking diagonally toward each other (from (-5,-5) to (5,5) and the reverse), then looping. Uses the `Walking actor` model. Load in Gazebo or pass as the world file for your PX4/Gazebo run if your setup supports it.
-- **`2_person_world.sdf`** – Two walking actors at fixed start positions.
-- **`random_walk.sdf`** – Single actor with a long random-walk trajectory.
-
-#### Person actor model
-
-The `sdf_examples/model.sdf` and `sdf_examples/model.config` files define a walking person actor model for Gazebo. To use it, copy or symlink the `sdf_examples/` directory into your Gazebo models path (e.g. `~/.gz/models/Walking/`) or reference it directly from your world SDF.
 
 ## HTTP Control Server
 
@@ -168,7 +167,7 @@ When running with `--enable-tracking`, you can select a specific person to follo
 
 ### Configuration
 
-- Change the server port with `--follow-server-port <port>` (default: 8080)
+- The follow server is always running. Change its port with `--follow-server-port <port>` (default: 8080).
 
 ## Yaw-Only Mode
 
