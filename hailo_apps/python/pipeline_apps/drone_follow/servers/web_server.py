@@ -114,7 +114,7 @@ class _WebHandler(BaseHTTPRequestHandler):
     target_state = None   # FollowTargetState
     shared_state = None   # SharedDetectionState
     controller_config = None  # ControllerConfig
-    static_dir: str = None
+    follow_server_port: int = 8080
 
     def log_message(self, format, *args):
         pass
@@ -220,7 +220,9 @@ class _WebHandler(BaseHTTPRequestHandler):
         if cfg is None:
             self.send_error(404, "No controller config available")
             return
-        self._send_json({k: getattr(cfg, k) for k in self._CONFIG_FIELDS})
+        data = {k: getattr(cfg, k) for k in self._CONFIG_FIELDS}
+        data["follow_server_port"] = self.follow_server_port
+        self._send_json(data)
 
     def _handle_logs(self):
         """Return log entries newer than ?since_id=N."""
@@ -323,54 +325,16 @@ class _WebHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         if self.path == "/api/config":
             self._handle_post_config()
-        elif self.path == "/api/follow/clear":
-            self._handle_follow_clear()
-        elif self.path.startswith("/api/follow/"):
-            self._handle_follow()
         else:
             self.send_error(404, "Not Found")
-
-    def _handle_follow(self):
-        try:
-            id_str = self.path.split("/api/follow/")[1]
-            detection_id = int(id_str)
-        except (ValueError, IndexError):
-            self.send_error(400, "Invalid detection ID")
-            return
-
-        if self.shared_state is not None:
-            available = self.shared_state.get_available_ids()
-            if detection_id not in available:
-                self._send_json({
-                    "status": "error",
-                    "message": f"ID {detection_id} not in frame",
-                    "available_ids": list(available),
-                }, status=404)
-                return
-
-        if self.target_state is not None:
-            self.target_state.set_target(detection_id)
-
-        self._send_json({"status": "success", "following_id": detection_id})
-        LOGGER.info("Now following ID: %d", detection_id)
-
-    def _handle_follow_clear(self):
-        if self.target_state is not None:
-            self.target_state.set_target(None)
-
-        self._send_json({
-            "status": "success",
-            "following_id": None,
-            "message": "Cleared target, following largest person",
-        })
-        LOGGER.info("Cleared target, following largest person")
 
 
 class WebServer:
     """Web server for drone-follow UI. Runs in a daemon thread."""
 
     def __init__(self, ui_state, target_state=None, shared_state=None,
-                 controller_config=None, host="0.0.0.0", port=5001, static_dir=None):
+                 controller_config=None, host="0.0.0.0", port=5001, static_dir=None,
+                 follow_server_port=8080):
         self.ui_state = ui_state
         self.target_state = target_state
         self.shared_state = shared_state
@@ -378,6 +342,7 @@ class WebServer:
         self.host = host
         self.port = port
         self.static_dir = static_dir
+        self.follow_server_port = follow_server_port
         self.server = None
         self.thread = None
 
@@ -387,6 +352,7 @@ class WebServer:
         _WebHandler.shared_state = self.shared_state
         _WebHandler.controller_config = self.controller_config
         _WebHandler.static_dir = self.static_dir
+        _WebHandler.follow_server_port = self.follow_server_port
 
         self.server = ThreadingHTTPServer((self.host, self.port), _WebHandler)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)

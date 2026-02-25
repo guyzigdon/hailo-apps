@@ -5,7 +5,7 @@ import time
 
 import pytest
 
-from drone_control import (
+from follow_api import (
     Detection,
     SharedDetectionState,
 )

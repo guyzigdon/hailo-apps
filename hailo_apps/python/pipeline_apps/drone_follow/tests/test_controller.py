@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from drone_control import (
+from follow_api import (
     Detection,
     ControllerConfig,
     compute_velocity_command,
