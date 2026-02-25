@@ -241,7 +241,6 @@ def _add_drone_follow_args(parser):
                             f"(default: {defaults.target_distance_m})")
     group.add_argument("--person-height", type=float, default=defaults.person_height_m, metavar="M",
                        help=f"Assumed person height for distance calculation (default: {defaults.person_height_m}m)")
-    group.add_argument("--horizontal-mirror", dest="horizontal_mirror", action="store_true", help="Enable horizontal mirroring (cancels --no-horizontal-mirror)")
 
     # Controller gains and loop behavior
     group.add_argument("--control-loop-hz", type=float, default=defaults.control_loop_hz)
@@ -548,10 +547,6 @@ def main():
             import sys as _sys
             _sys.argv.append("--enable-tracking")
             LOGGER.info("[ui] Auto-enabling tracking for UI mode")
-
-    # Add --no-horizontal-mirror unless --horizontal-mirror (or --no-horizontal-mirror) was given (drone cameras aren't mirrored by default)
-    if "--horizontal-mirror" not in sys.argv and "--no-horizontal-mirror" not in sys.argv:
-        sys.argv.append("--no-horizontal-mirror")
 
     app = create_app(shared_state, target_state=target_state, eos_reached=eos_reached,
                      ui_state=ui_state, ui_fps=ui_pre_args.ui_fps)

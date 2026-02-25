@@ -187,7 +187,7 @@ class GStreamerTilingApp(GStreamerApp):
         self.border_threshold = self.config.border_threshold
         self.input_codec = getattr(self.options_menu, 'input_codec', 'auto')
         self.no_display = getattr(self.options_menu, 'no_display', False)
-        self.no_horizontal_mirror = getattr(self.options_menu, 'no_horizontal_mirror', False) and not getattr(self.options_menu, 'horizontal_mirror', False)
+        self.no_horizontal_mirror = getattr(self.options_menu, 'no_horizontal_mirror', False)
         self.vertical_mirror = getattr(self.options_menu, 'vertical_mirror', False)
         self.save_output = getattr(self.options_menu, 'save_output', None)
         
