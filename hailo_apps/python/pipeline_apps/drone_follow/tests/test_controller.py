@@ -92,7 +92,7 @@ class TestYaw:
 
 
 # ---- Altitude (vertical centering) ----
-# Default config has fixed_altitude=False. Altitude tests use fixed_altitude=False explicitly.
+# Default config has fixed_altitude=False.
 
 class TestAltitude:
     def test_centered_within_dead_zone(self, config):
