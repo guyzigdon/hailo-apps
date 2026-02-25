@@ -1,3 +1,20 @@
+#!/usr/bin/env python3
+"""
+Video Bridge — connect Gazebo simulation camera to external GStreamer pipelines.
+
+This script subscribes to the Gazebo transport topic `/camera` (protobuf images),
+decodes the raw pixel data, compresses it to JPEG, and streams it via UDP
+to 127.0.0.1:5600.
+
+This allows the `drone_follow` application to run against a simulated drone
+camera feed by treating the UDP stream as a video source (e.g. via udpsrc).
+
+Requirements:
+    - Must run inside the Gazebo simulation container or environment where
+      `gz.transport` and `gz.msgs` are available.
+    - `opencv-python` and `numpy` must be installed.
+"""
+
 import os
 # Required for gz.msgs* protobuf compatibility with system-installed protoc-generated code
 os.environ["PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION"] = "python"

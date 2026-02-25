@@ -99,7 +99,9 @@ export default function App() {
 
   const handleFollow = async (id) => {
     try {
-      await fetch(`/api/follow/${id}`, { method: "POST" });
+      const port = config?.follow_server_port || 8080;
+      const host = window.location.hostname;
+      await fetch(`http://${host}:${port}/follow/${id}`, { method: "POST" });
     } catch {
       // ignore
     }
@@ -107,7 +109,9 @@ export default function App() {
 
   const handleClear = async () => {
     try {
-      await fetch("/api/follow/clear", { method: "POST" });
+      const port = config?.follow_server_port || 8080;
+      const host = window.location.hostname;
+      await fetch(`http://${host}:${port}/follow/clear`, { method: "POST" });
     } catch {
       // ignore
     }

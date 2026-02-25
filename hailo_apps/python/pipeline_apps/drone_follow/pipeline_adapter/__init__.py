@@ -6,13 +6,7 @@ ByteTracker (multi-object tracker) also lives here.
 """
 
 from .byte_tracker import ByteTracker
-
-try:
-    from .hailo_tiling import app_callback, create_app, add_pipeline_args
-except Exception:  # pragma: no cover - optional runtime dependencies
-    app_callback = None
-    create_app = None
-    add_pipeline_args = None
+from .hailo_drone_detection_manager import app_callback, create_app, add_pipeline_args
 
 __all__ = [
     "ByteTracker",
