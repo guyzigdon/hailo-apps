@@ -241,7 +241,7 @@ def _add_drone_follow_args(parser):
                             f"(default: {defaults.target_distance_m})")
     group.add_argument("--person-height", type=float, default=defaults.person_height_m, metavar="M",
                        help=f"Assumed person height for distance calculation (default: {defaults.person_height_m}m)")
-    group.add_argument("--horizontal-mirror", dest="h_mirror", action="store_true", help="Enable horizontal mirroring (cancels --no-horizontal-mirror)")
+    group.add_argument("--horizontal-mirror", dest="horizontal_mirror", action="store_true", help="Enable horizontal mirroring (cancels --no-horizontal-mirror)")
 
     # Controller gains and loop behavior
     group.add_argument("--control-loop-hz", type=float, default=defaults.control_loop_hz)
@@ -418,8 +418,8 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
                 frame_rate=self.frame_rate,
                 sync=self.sync,
                 input_codec=self.input_codec,
-                horizontal_mirror=not self.no_mirror,
-                vertical_mirror=self.v_mirror,
+                horizontal_mirror=not self.no_horizontal_mirror,
+                vertical_mirror=self.vertical_mirror,
             )
 
             nms_score_thresh = self.nms_score_threshold if self.nms_score_threshold is not None else 0.001

@@ -140,8 +140,8 @@ class GStreamerTilingApp(GStreamerApp):
         
         # Display options
         parser.add_argument("--no-display", action="store_true", help="Disable display window (headless mode)")
-        parser.add_argument("--no-horizontal-mirror", dest="no_mirror", action="store_true", help="Disable horizontal mirroring for camera input")
-        parser.add_argument("--vertical-mirror", dest="v_mirror", action="store_true", help="Enable vertical mirroring (flip image upside down)")
+        parser.add_argument("--no-horizontal-mirror", dest="no_horizontal_mirror", action="store_true", help="Disable horizontal mirroring for camera input")
+        parser.add_argument("--vertical-mirror", dest="vertical_mirror", action="store_true", help="Enable vertical mirroring (flip image upside down)")
         parser.add_argument("--save-output", type=str, default=None, help="Save output video to file (for camera/live sources)")
         
         # Tracking options
@@ -187,8 +187,8 @@ class GStreamerTilingApp(GStreamerApp):
         self.border_threshold = self.config.border_threshold
         self.input_codec = getattr(self.options_menu, 'input_codec', 'auto')
         self.no_display = getattr(self.options_menu, 'no_display', False)
-        self.no_mirror = getattr(self.options_menu, 'no_mirror', False) and not getattr(self.options_menu, 'h_mirror', False)
-        self.v_mirror = getattr(self.options_menu, 'v_mirror', False)
+        self.no_horizontal_mirror = getattr(self.options_menu, 'no_horizontal_mirror', False) and not getattr(self.options_menu, 'horizontal_mirror', False)
+        self.vertical_mirror = getattr(self.options_menu, 'vertical_mirror', False)
         self.save_output = getattr(self.options_menu, 'save_output', None)
         
         # Tracking configuration
@@ -283,8 +283,8 @@ class GStreamerTilingApp(GStreamerApp):
             frame_rate=self.frame_rate,
             sync=self.sync,
             input_codec=self.input_codec,
-            horizontal_mirror=not self.no_mirror,
-            vertical_mirror=self.v_mirror,
+            horizontal_mirror=not self.no_horizontal_mirror,
+            vertical_mirror=self.vertical_mirror,
         )
 
         # Default to 0.001 if not specified (original behavior)
