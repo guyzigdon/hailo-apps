@@ -140,9 +140,8 @@ class GStreamerTilingApp(GStreamerApp):
         
         # Display options
         parser.add_argument("--no-display", action="store_true", help="Disable display window (headless mode)")
-        parser.add_argument("--no-mirror", action="store_true", help="Disable horizontal mirroring for camera input")
-        parser.add_argument("--h-mirror", dest="h_mirror", action="store_true", help="Enable horizontal mirroring (cancels --no-mirror)")
-        parser.add_argument("--v-mirror", action="store_true", help="Enable vertical mirroring (flip image upside down)")
+        parser.add_argument("--no-horizontal-mirror", dest="no_mirror", action="store_true", help="Disable horizontal mirroring for camera input")
+        parser.add_argument("--vertical-mirror", dest="v_mirror", action="store_true", help="Enable vertical mirroring (flip image upside down)")
         parser.add_argument("--save-output", type=str, default=None, help="Save output video to file (for camera/live sources)")
         
         # Tracking options
