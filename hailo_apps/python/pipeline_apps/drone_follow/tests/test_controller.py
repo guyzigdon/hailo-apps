@@ -293,7 +293,7 @@ class TestConfigArgs:
 
 class TestConfigValidation:
     def test_default_config_is_valid(self):
-        """Default config (bbox-height mode + variable altitude) should pass validation."""
+        """Default config (ysing target-bbox-height + variable altitude) should pass validation."""
         cfg = ControllerConfig()
         cfg.validate()
 
@@ -318,7 +318,7 @@ class TestConfigValidation:
 
 class TestConfigFromArgsMutualExclusivity:
     def test_defaults_use_bbox_height_mode(self):
-        """No explicit args -> defaults to bbox-height mode, variable altitude (target_distance_m=None, fixed_altitude=False)."""
+        """No explicit args -> defaults to using target-bbox-height parameter, variable altitude (target_distance_m=None, fixed_altitude=False)."""
         cfg = ControllerConfig.from_args(SimpleNamespace())
         assert cfg.target_distance_m is None
         assert cfg.fixed_altitude is False

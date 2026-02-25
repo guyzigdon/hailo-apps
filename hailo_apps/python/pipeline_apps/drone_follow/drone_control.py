@@ -133,25 +133,19 @@ class ControllerConfig:
 
         # --target-distance and --target-bbox-height are mutually exclusive.
         # Argparse defaults are None so we can detect user-explicit values.
-        _user_distance = getattr(args, "target_distance", None)
-        _user_bbox = getattr(args, "target_bbox_height", None)
-        if _user_distance is not None and _user_bbox is not None:
+        target_distance = getattr(args, "target_distance", None)
+        target_bbox_height = getattr(args, "target_bbox_height", None)
+        if target_distance is not None and target_bbox_height is not None:
             raise ValueError(
                 "--target-distance and --target-bbox-height are mutually exclusive"
             )
-        # If user explicitly chose bbox-height mode, disable distance mode.
-        if _user_bbox is not None and _user_distance is None:
-            target_distance_val = None
-        else:
-            target_distance_val = _arg("target_distance", "target_distance_m",
-                                       default=defaults.target_distance_m)
 
         # --target-distance requires --fixed-altitude; reject invalid combination.
         fixed_alt = _arg("fixed_altitude", default=defaults.fixed_altitude)
-        if _user_distance is not None and not fixed_alt:
+        if target_distance is not None and not fixed_alt:
             raise ValueError(
                 "--target-distance requires --fixed-altitude; "
-                "use --fixed-altitude when setting a target distance, or omit --target-distance for bbox-height mode."
+                "use --fixed-altitude when setting a target distance, or omit --target-distance for using target-bbox-height parameter."
             )
 
         return cls(
@@ -162,7 +156,7 @@ class ControllerConfig:
             kp_forward=float(_arg("kp_forward", "forward_gain", default=defaults.kp_forward)),
             kp_backward=_arg("kp_backward", "backward_gain", default=defaults.kp_backward),
             target_bbox_height=_arg("target_bbox_height", default=defaults.target_bbox_height),
-            target_distance_m=target_distance_val,
+            target_distance_m=target_distance,
             person_height_m=_arg("person_height", "person_height_m", default=defaults.person_height_m),
             dead_zone_height_percent=_arg("dead_zone_height_percent", default=defaults.dead_zone_height_percent),
             reference_altitude_m=ref_alt,
