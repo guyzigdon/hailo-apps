@@ -74,6 +74,33 @@
 - **`--ui`** – Enable web UI with live video and click-to-follow (requires UI built; see Optional – Web UI above).
 - **Input/connection:** Pipeline input is set with `--input` (e.g. `udp://0.0.0.0:5600`, `rpi`, `usb`). MAVLink connection defaults to `udpin://0.0.0.0:14540`; override with `--connection` or use `--serial` for a serial link.
 
+### Loading a custom Gazebo world
+
+Use `--px4-path` and `--world` to automatically load a custom SDF world into Gazebo.
+The app temporarily replaces PX4's `default.sdf` with a symlink to the chosen world,
+waits for the drone to connect (meaning Gazebo has loaded), then restores the original.
+
+```bash
+python drone_follow.py \
+  --px4-path ~/Desktop/PX4-Autopilot \
+  --world 2_person_world \
+  --input udp://0.0.0.0:5600
+```
+
+Then start PX4 SITL in another terminal as usual (`make px4_sitl gz_x500_mono_cam`).
+
+`--world` accepts either a name from `sdf_examples/` (without `.sdf`) or a full path to an SDF file.
+
+Example worlds in `sdf_examples/`:
+
+- **`2_person_world`** – Two walking actors at fixed start positions.
+- **`2_persons_diagonal`** – Two persons walking diagonally toward each other, looping.
+- **`random_walk`** – Single actor with a long random-walk trajectory.
+
+#### Person actor model
+
+The walking person model is in `sdf_examples/Walking actor/`. Copy or symlink it into your Gazebo models path (e.g. `~/.gz/models/Walking actor/`) so the world files can reference it.
+
 ### Running drone_follow on a different PC than the simulation
 
 You can run the PX4 SITL simulation (e.g. on a Raspberry Pi) on one machine and the drone_follow application on another. Video and MAVLink are sent over UDP to the host running drone_follow.
