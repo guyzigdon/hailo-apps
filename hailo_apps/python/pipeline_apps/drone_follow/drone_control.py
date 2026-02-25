@@ -68,7 +68,7 @@ class ControllerConfig:
     kp_down: float = 0.08
     max_down_speed: float = 1.5
     target_bbox_height: float = 0.3
-    target_distance_m: Optional[float] = 8.0   # desired horizontal distance; overrides target_bbox_height when set
+    target_distance_m: Optional[float] = None  # desired horizontal distance; overrides target_bbox_height when set
     person_height_m: float = 1.7               # assumed person height for distance calculation
     kp_forward: float = 3.0
     kp_backward: float = 5.0
@@ -79,7 +79,7 @@ class ControllerConfig:
     search_enter_delay_s: float = 2.0
     search_timeout_s: float = 60.0
     control_loop_hz: float = 10.0
-    fixed_altitude: bool = True
+    fixed_altitude: bool = False
     max_bbox_height_safety: float = 0.8  # Safety limit: if bbox height > 0.8, we are too close
     yaw_only: bool = False
     reference_altitude_m: float = 3.0  # target_bbox_height is defined at this altitude; scales by (ref_alt/current_alt)
@@ -146,10 +146,13 @@ class ControllerConfig:
             target_distance_val = _arg("target_distance", "target_distance_m",
                                        default=defaults.target_distance_m)
 
-        # fixed_altitude=False is incompatible with target_distance_m; fall back to bbox-height mode.
+        # --target-distance requires --fixed-altitude; reject invalid combination.
         fixed_alt = _arg("fixed_altitude", default=defaults.fixed_altitude)
-        if not fixed_alt and target_distance_val is not None:
-            target_distance_val = None
+        if _user_distance is not None and not fixed_alt:
+            raise ValueError(
+                "--target-distance requires --fixed-altitude; "
+                "use --fixed-altitude when setting a target distance, or omit --target-distance for bbox-height mode."
+            )
 
         return cls(
             hfov=_arg("hfov", default=defaults.hfov),

@@ -92,7 +92,7 @@ class TestYaw:
 
 
 # ---- Altitude (vertical centering) ----
-# Default config has fixed_altitude=True (down always 0). Use fixed_altitude=False for altitude tests.
+# Default config has fixed_altitude=False. Altitude tests use fixed_altitude=False explicitly.
 
 class TestAltitude:
     def test_centered_within_dead_zone(self, config):
@@ -293,7 +293,7 @@ class TestConfigArgs:
 
 class TestConfigValidation:
     def test_default_config_is_valid(self):
-        """Default config (distance mode + fixed altitude) should pass validation."""
+        """Default config (bbox-height mode + variable altitude) should pass validation."""
         cfg = ControllerConfig()
         cfg.validate()
 
@@ -317,11 +317,11 @@ class TestConfigValidation:
 
 
 class TestConfigFromArgsMutualExclusivity:
-    def test_defaults_use_distance_mode(self):
-        """No explicit args -> defaults to distance mode (target_distance_m=8.0)."""
+    def test_defaults_use_bbox_height_mode(self):
+        """No explicit args -> defaults to bbox-height mode, variable altitude (target_distance_m=None, fixed_altitude=False)."""
         cfg = ControllerConfig.from_args(SimpleNamespace())
-        assert cfg.target_distance_m == 8.0
-        assert cfg.fixed_altitude is True
+        assert cfg.target_distance_m is None
+        assert cfg.fixed_altitude is False
 
     def test_explicit_bbox_height_disables_distance(self):
         """Passing --target-bbox-height should set target_distance_m=None."""
@@ -329,9 +329,15 @@ class TestConfigFromArgsMutualExclusivity:
         assert cfg.target_distance_m is None
         assert cfg.target_bbox_height == 0.4
 
-    def test_explicit_distance_keeps_distance_mode(self):
-        cfg = ControllerConfig.from_args(SimpleNamespace(target_distance=12.0))
+    def test_explicit_distance_without_fixed_altitude_raises(self):
+        """--target-distance without --fixed-altitude raises (invalid combination)."""
+        with pytest.raises(ValueError, match="--target-distance requires --fixed-altitude"):
+            ControllerConfig.from_args(SimpleNamespace(target_distance=12.0))
+
+    def test_explicit_distance_with_fixed_altitude_keeps_distance_mode(self):
+        cfg = ControllerConfig.from_args(SimpleNamespace(target_distance=12.0, fixed_altitude=True))
         assert cfg.target_distance_m == 12.0
+        assert cfg.fixed_altitude is True
 
     def test_both_distance_and_bbox_raises(self):
         with pytest.raises(ValueError, match="mutually exclusive"):

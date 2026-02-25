@@ -237,7 +237,7 @@ def _add_drone_follow_args(parser):
     group.add_argument("--target-distance", type=float, default=None, metavar="M",
                        help="Desired horizontal distance to person in metres. Requires --fixed-altitude. "
                             "Mutually exclusive with --target-bbox-height. "
-                            f"(default: {defaults.target_distance_m})")
+                            "(default: None, use target-bbox-height)")
     group.add_argument("--person-height", type=float, default=defaults.person_height_m, metavar="M",
                        help=f"Assumed person height for distance calculation (default: {defaults.person_height_m}m)")
 
@@ -253,7 +253,7 @@ def _add_drone_follow_args(parser):
 
     # Flight mode and mission lifecycle
     group.add_argument("--fixed-altitude", action=argparse.BooleanOptionalAction, default=defaults.fixed_altitude,
-                       help="Keep altitude fixed (default). Use --no-fixed-altitude to allow vertical following.")
+                       help="Keep altitude fixed. Default: False (vertical following). --target-distance requires this.")
     group.add_argument("--yaw-only", action="store_true",
                        help="Yaw only mode: no forward/backward or altitude movement")
     group.add_argument("--no-takeoff-landing", action="store_true",
