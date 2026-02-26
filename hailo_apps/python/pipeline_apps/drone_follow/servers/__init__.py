@@ -5,13 +5,13 @@ WebServer: Web UI with MJPEG stream and interactive bounding boxes.
 """
 
 from .follow_server import FollowServer, FollowServerHandler
-from .screen_recorder import ScreenRecorder
+from .video_recorder import VideoRecorder
 from .web_server import SharedUIState, WebServer
 
 __all__ = [
     "FollowServer",
     "FollowServerHandler",
-    "ScreenRecorder",
+    "VideoRecorder",
     "SharedUIState",
     "WebServer",
 ]

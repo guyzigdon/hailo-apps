@@ -63,6 +63,8 @@ def _add_app_args(parser: argparse.ArgumentParser) -> None:
                        help="Web UI server port (default: 5001)")
     group.add_argument("--ui-fps", type=int, default=10,
                        help="MJPEG stream frame rate (default: 10)")
+    group.add_argument("--record", action="store_true",
+                       help="Record raw video + detections for the entire session (requires --ui)")
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -107,6 +109,7 @@ def main():
     ui_pre.add_argument("--ui", action="store_true")
     ui_pre.add_argument("--ui-port", type=int, default=5001)
     ui_pre.add_argument("--ui-fps", type=int, default=10)
+    ui_pre.add_argument("--record", action="store_true")
     ui_pre.add_argument("--enable-tracking", action="store_true")
     ui_pre_args, _ = ui_pre.parse_known_args()
 
@@ -155,7 +158,7 @@ def main():
     follow_server.start()
 
     # Start web UI server
-    screen_recorder = None
+    video_recorder = None
     if ui_state is not None:
         static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ui", "build")
         web_server = WebServer(ui_state, target_state, shared_state,
@@ -164,14 +167,14 @@ def main():
                                follow_server_port=args.follow_server_port)
         web_server.start()
 
-        try:
-            from servers import ScreenRecorder
-        except ImportError:
-            from .servers import ScreenRecorder
-        recordings_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "recordings")
-        screen_recorder = ScreenRecorder(output_dir=recordings_dir)
-        from servers.web_server import _WebHandler
-        _WebHandler.screen_recorder = screen_recorder
+        if ui_pre_args.record:
+            try:
+                from servers import VideoRecorder
+            except ImportError:
+                from .servers import VideoRecorder
+            recordings_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "recordings")
+            video_recorder = VideoRecorder(ui_state, output_dir=recordings_dir, fps=ui_pre_args.ui_fps)
+            video_recorder.start()
 
     def _quit_pipeline():
         """Tell GStreamer to quit (safe to call multiple times)."""
@@ -222,8 +225,8 @@ def main():
     finally:
         if not shutdown.is_set():
             shutdown.set()
-        if screen_recorder is not None:
-            screen_recorder.stop()
+        if video_recorder is not None:
+            video_recorder.stop()
         # Wait for drone thread to finish cleanly
         drone_thread.join(timeout=5.0)
         if web_server is not None:

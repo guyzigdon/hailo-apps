@@ -115,8 +115,6 @@ class _WebHandler(BaseHTTPRequestHandler):
     shared_state = None   # SharedDetectionState
     controller_config = None  # ControllerConfig
     follow_server_port: int = 8080
-    screen_recorder = None
-
     def log_message(self, format, *args):
         pass
 
@@ -157,8 +155,6 @@ class _WebHandler(BaseHTTPRequestHandler):
             self._handle_status()
         elif self.path == "/api/config":
             self._handle_get_config()
-        elif self.path == "/api/record/status":
-            self._handle_record_status()
         elif self.path.startswith("/api/logs"):
             self._handle_logs()
         else:
@@ -239,24 +235,6 @@ class _WebHandler(BaseHTTPRequestHandler):
                     except ValueError:
                         pass
         self._send_json({"logs": self.ui_state.get_logs(since_id)})
-
-    def _handle_record_status(self):
-        if self.screen_recorder is None:
-            self._send_json({"recording": False, "available": False})
-            return
-        self._send_json(self.screen_recorder.status())
-
-    def _handle_record_start(self):
-        if self.screen_recorder is None:
-            self._send_json({"recording": False, "available": False})
-            return
-        self._send_json(self.screen_recorder.start())
-
-    def _handle_record_stop(self):
-        if self.screen_recorder is None:
-            self._send_json({"recording": False, "available": False})
-            return
-        self._send_json(self.screen_recorder.stop())
 
     def _handle_post_config(self):
         cfg = self.controller_config
@@ -346,10 +324,6 @@ class _WebHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         if self.path == "/api/config":
             self._handle_post_config()
-        elif self.path == "/api/record/start":
-            self._handle_record_start()
-        elif self.path == "/api/record/stop":
-            self._handle_record_stop()
         else:
             self.send_error(404, "Not Found")
 
