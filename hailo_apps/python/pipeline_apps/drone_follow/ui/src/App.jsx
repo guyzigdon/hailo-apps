@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 
 const POLL_INTERVAL = 100; // ms
 const LOG_POLL_INTERVAL = 500; // ms
+const RECORD_POLL_INTERVAL = 1000; // ms
 const DEBOUNCE_MS = 250;
 
 export default function App() {
@@ -12,6 +13,10 @@ export default function App() {
   const [logsOpen, setLogsOpen] = useState(true);
   const [logs, setLogs] = useState([]);
   const [config, setConfig] = useState(null);
+  const [recording, setRecording] = useState(false);
+  const [recordElapsed, setRecordElapsed] = useState(0);
+  const [recordError, setRecordError] = useState(null);
+  const [recordAvailable, setRecordAvailable] = useState(false);
   const imgRef = useRef(null);
   const debounceRef = useRef(null);
   const logSinceRef = useRef(0);
@@ -51,6 +56,45 @@ export default function App() {
       })
       .catch(() => {});
   }, []);
+
+  // Poll record status
+  useEffect(() => {
+    let active = true;
+    const poll = async () => {
+      while (active) {
+        try {
+          const res = await fetch("/api/record/status");
+          if (res.ok) {
+            const data = await res.json();
+            setRecording(data.recording);
+            setRecordElapsed(data.elapsed_seconds || 0);
+            setRecordAvailable(data.available !== false);
+            if (data.error) setRecordError(data.error);
+          }
+        } catch {
+          // server not ready
+        }
+        await new Promise((r) => setTimeout(r, RECORD_POLL_INTERVAL));
+      }
+    };
+    poll();
+    return () => { active = false; };
+  }, []);
+
+  const toggleRecording = async () => {
+    setRecordError(null);
+    try {
+      const endpoint = recording ? "/api/record/stop" : "/api/record/start";
+      const res = await fetch(endpoint, { method: "POST" });
+      if (res.ok) {
+        const data = await res.json();
+        setRecording(data.recording);
+        if (data.error) setRecordError(data.error);
+      }
+    } catch {
+      setRecordError("Failed to toggle recording");
+    }
+  };
 
   // Poll logs
   useEffect(() => {
@@ -183,6 +227,19 @@ export default function App() {
             {velocity.yawspeed_deg_s.toFixed(1)} deg/s
           </span>
         )}
+        {recordAvailable && (
+          <button
+            className={`record-btn${recording ? " record-active" : ""}`}
+            onClick={toggleRecording}
+            title={recordError || ""}
+          >
+            <span className={`record-dot${recording ? " record-dot-blink" : ""}`} />
+            {recording
+              ? `REC ${String(Math.floor(recordElapsed / 60)).padStart(2, "0")}:${String(Math.floor(recordElapsed % 60)).padStart(2, "0")}`
+              : "REC"}
+          </button>
+        )}
+        {recordError && <span className="record-error">{recordError}</span>}
         <button className="clear-btn" onClick={handleClear}>
           Clear Target
         </button>

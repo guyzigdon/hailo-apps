@@ -155,6 +155,7 @@ def main():
     follow_server.start()
 
     # Start web UI server
+    screen_recorder = None
     if ui_state is not None:
         static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ui", "build")
         web_server = WebServer(ui_state, target_state, shared_state,
@@ -162,6 +163,15 @@ def main():
                                port=args.ui_port, static_dir=static_dir,
                                follow_server_port=args.follow_server_port)
         web_server.start()
+
+        try:
+            from servers import ScreenRecorder
+        except ImportError:
+            from .servers import ScreenRecorder
+        recordings_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "recordings")
+        screen_recorder = ScreenRecorder(output_dir=recordings_dir)
+        from servers.web_server import _WebHandler
+        _WebHandler.screen_recorder = screen_recorder
 
     takeoff_done = threading.Event()
 
@@ -206,6 +216,8 @@ def main():
         takeoff_done.set()
         LOGGER.warning("[drone] Shutdown.")
     finally:
+        if screen_recorder is not None:
+            screen_recorder.stop()
         if web_server is not None:
             web_server.stop()
         follow_server.stop()
