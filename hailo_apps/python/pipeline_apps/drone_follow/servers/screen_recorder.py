@@ -1,4 +1,4 @@
-"""Screen recorder using ffmpeg x11grab for full desktop capture."""
+"""Screen recorder for full desktop capture (X11 via ffmpeg, Wayland via wf-recorder)."""
 
 import logging
 import os
@@ -13,7 +13,7 @@ LOGGER = logging.getLogger("drone_follow.screen_recorder")
 
 
 class ScreenRecorder:
-    """Thread-safe screen recorder that captures the host desktop via ffmpeg."""
+    """Thread-safe screen recorder (X11 via ffmpeg x11grab, Wayland via wf-recorder)."""
 
     def __init__(self, output_dir: str = "recordings"):
         self._output_dir = output_dir
@@ -22,30 +22,33 @@ class ScreenRecorder:
         self._file_path: str | None = None
         self._start_time: float | None = None
         self._error: str | None = None
+        self._is_wayland: bool = False
 
-    def start(self) -> dict:
-        """Start recording the screen. Returns status dict."""
-        with self._lock:
-            if self._process is not None and self._process.poll() is None:
-                return {"recording": True, "error": "Already recording"}
+    def _build_command(self, file_path: str) -> list[str] | None:
+        """Build the recording command based on session type. Returns None on error."""
+        session_type = os.environ.get("XDG_SESSION_TYPE", "").lower()
+        self._is_wayland = session_type == "wayland"
 
+        if self._is_wayland:
+            if not shutil.which("wf-recorder"):
+                self._error = (
+                    "wf-recorder not found. Install it with: "
+                    "sudo apt install wf-recorder"
+                )
+                return None
+            return [
+                "wf-recorder",
+                "-f", file_path,
+                "-c", "libx264",
+                "-p", "preset=ultrafast",
+                "-p", "crf=23",
+            ]
+        else:
             if not shutil.which("ffmpeg"):
                 self._error = "ffmpeg not found in PATH"
-                return {"recording": False, "error": self._error}
-
-            session_type = os.environ.get("XDG_SESSION_TYPE", "").lower()
-            if session_type == "wayland":
-                self._error = "Wayland is not supported; x11grab requires X11"
-                return {"recording": False, "error": self._error}
-
+                return None
             display = os.environ.get("DISPLAY", ":0")
-            os.makedirs(self._output_dir, exist_ok=True)
-
-            timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-            self._file_path = os.path.join(self._output_dir, f"rec_{timestamp}.mp4")
-            self._error = None
-
-            cmd = [
+            return [
                 "ffmpeg", "-y",
                 "-f", "x11grab",
                 "-framerate", "30",
@@ -54,8 +57,23 @@ class ScreenRecorder:
                 "-preset", "ultrafast",
                 "-crf", "23",
                 "-pix_fmt", "yuv420p",
-                self._file_path,
+                file_path,
             ]
+
+    def start(self) -> dict:
+        """Start recording the screen. Returns status dict."""
+        with self._lock:
+            if self._process is not None and self._process.poll() is None:
+                return {"recording": True, "error": "Already recording"}
+
+            os.makedirs(self._output_dir, exist_ok=True)
+            timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            self._file_path = os.path.join(self._output_dir, f"rec_{timestamp}.mp4")
+            self._error = None
+
+            cmd = self._build_command(self._file_path)
+            if cmd is None:
+                return {"recording": False, "error": self._error}
 
             try:
                 self._process = subprocess.Popen(
@@ -65,7 +83,7 @@ class ScreenRecorder:
                     stderr=subprocess.PIPE,
                 )
             except OSError as e:
-                self._error = f"Failed to start ffmpeg: {e}"
+                self._error = f"Failed to start recorder: {e}"
                 self._process = None
                 return {"recording": False, "error": self._error}
 
@@ -76,7 +94,7 @@ class ScreenRecorder:
         with self._lock:
             if self._process is not None and self._process.poll() is not None:
                 stderr = self._process.stderr.read().decode(errors="replace") if self._process.stderr else ""
-                self._error = f"ffmpeg exited immediately: {stderr[-200:]}"
+                self._error = f"Recorder exited immediately: {stderr[-200:]}"
                 self._process = None
                 self._start_time = None
                 return {"recording": False, "error": self._error}
@@ -106,7 +124,7 @@ class ScreenRecorder:
         try:
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
-            LOGGER.warning("ffmpeg did not stop gracefully, sending SIGKILL")
+            LOGGER.warning("Recorder did not stop gracefully, sending SIGKILL")
             proc.kill()
             proc.wait(timeout=2)
 
@@ -132,7 +150,7 @@ class ScreenRecorder:
             # Check if ffmpeg died mid-recording
             if self._process.poll() is not None:
                 stderr = self._process.stderr.read().decode(errors="replace") if self._process.stderr else ""
-                self._error = f"ffmpeg exited unexpectedly: {stderr[-200:]}"
+                self._error = f"Recorder exited unexpectedly: {stderr[-200:]}"
                 self._process = None
                 elapsed = time.time() - self._start_time if self._start_time else 0
                 self._start_time = None
