@@ -173,11 +173,6 @@ def main():
         from servers.web_server import _WebHandler
         _WebHandler.screen_recorder = screen_recorder
 
-    def _eos_to_shutdown():
-        eos_reached.wait()
-        shutdown.set()
-    threading.Thread(target=_eos_to_shutdown, daemon=True).start()
-
     def _quit_pipeline():
         """Tell GStreamer to quit (safe to call multiple times)."""
         try:
@@ -185,13 +180,28 @@ def main():
         except Exception:
             pass
 
-    def run_pipeline():
+    def _eos_to_shutdown():
+        eos_reached.wait()
+        shutdown.set()
+        _quit_pipeline()
+    threading.Thread(target=_eos_to_shutdown, daemon=True).start()
+
+    def run_drone():
+        """Run drone control in a background thread with its own asyncio loop."""
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
         try:
-            app.run()
-        except SystemExit:
-            pass
-    pipeline_thread = threading.Thread(target=run_pipeline, daemon=False)
-    pipeline_thread.start()
+            loop.run_until_complete(
+                run_live_drone(args, shared_state, shutdown,
+                              config=controller_config, ui_state=ui_state))
+        except Exception:
+            LOGGER.warning("[drone] Drone connection failed — pipeline continues without drone control.", exc_info=True)
+        finally:
+            loop.close()
+
+    drone_thread = threading.Thread(target=run_drone, daemon=True)
+    drone_thread.start()
+    LOGGER.info("[app] Drone control started in background thread")
 
     def on_signal(*_):
         if not shutdown.is_set():
@@ -199,44 +209,23 @@ def main():
             LOGGER.warning("[drone] Ctrl+C received, shutting down...")
             _quit_pipeline()
 
-    # Register signal handlers at module level so they survive the asyncio loop
     signal.signal(signal.SIGINT, on_signal)
     if hasattr(signal, "SIGTERM"):
         signal.signal(signal.SIGTERM, on_signal)
 
+    # Run the GStreamer pipeline on the main thread (UI + Hailo start immediately)
+    LOGGER.info("[app] Starting Hailo pipeline and UI on main thread")
     try:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            for sig in (signal.SIGINT, signal.SIGTERM):
-                loop.add_signal_handler(sig, on_signal)
-        except NotImplementedError:
-            pass  # already registered above
-        loop.run_until_complete(
-            run_live_drone(args, shared_state, shutdown,
-                          config=controller_config, ui_state=ui_state))
-    except KeyboardInterrupt:
+        app.run()
+    except (SystemExit, KeyboardInterrupt):
+        pass
+    finally:
         if not shutdown.is_set():
             shutdown.set()
-        LOGGER.warning("[drone] Shutdown.")
-        _quit_pipeline()
-    except Exception:
-        LOGGER.warning("[drone] Drone connection failed — pipeline continues without drone control.", exc_info=True)
-    finally:
         if screen_recorder is not None:
             screen_recorder.stop()
-        if shutdown.is_set():
-            _quit_pipeline()
-        # Wait for pipeline; stay responsive to Ctrl+C
-        try:
-            while pipeline_thread.is_alive():
-                pipeline_thread.join(timeout=1.0)
-        except KeyboardInterrupt:
-            if not shutdown.is_set():
-                shutdown.set()
-            LOGGER.warning("[drone] Ctrl+C received, shutting down...")
-            _quit_pipeline()
-            pipeline_thread.join(timeout=5.0)
+        # Wait for drone thread to finish cleanly
+        drone_thread.join(timeout=5.0)
         if web_server is not None:
             web_server.stop()
         follow_server.stop()
