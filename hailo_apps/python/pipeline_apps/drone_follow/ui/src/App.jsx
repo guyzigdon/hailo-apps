@@ -16,7 +16,7 @@ export default function App() {
   const [recording, setRecording] = useState(false);
   const [recordElapsed, setRecordElapsed] = useState(0);
   const [recordError, setRecordError] = useState(null);
-  const [recordAvailable, setRecordAvailable] = useState(false);
+  const [recordAvailable, setRecordAvailable] = useState(true);
   const imgRef = useRef(null);
   const debounceRef = useRef(null);
   const logSinceRef = useRef(0);
