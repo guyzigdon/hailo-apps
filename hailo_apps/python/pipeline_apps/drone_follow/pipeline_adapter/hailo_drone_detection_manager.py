@@ -455,11 +455,12 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
             )
 
             # Tee splits into display + MJPEG + recording
+            # All branches use leaky queues so a slow branch never stalls the others
             output_pipeline = (
                 f"tee name=ui_tee "
-                f"ui_tee. ! {QUEUE(name='display_branch_q')} ! {display_branch} "
-                f"ui_tee. ! {QUEUE(name='mjpeg_branch_q')} ! {mjpeg_branch} "
-                f"ui_tee. ! {QUEUE(name='record_branch_q')} ! {record_branch}"
+                f"ui_tee. ! {QUEUE(name='display_branch_q', leaky='downstream')} ! {display_branch} "
+                f"ui_tee. ! {QUEUE(name='mjpeg_branch_q', leaky='downstream')} ! {mjpeg_branch} "
+                f"ui_tee. ! {QUEUE(name='record_branch_q', max_size_buffers=1, leaky='downstream')} ! {record_branch}"
             )
 
             pipeline_parts = [source_pipeline, tile_cropper_pipeline]
