@@ -638,6 +638,42 @@ def VIDEO_STREAM_PIPELINE(port=5004, host="127.0.0.1", bitrate=2048):
     )
 
 
+def OPENHD_STREAM_PIPELINE(port=5500, host="127.0.0.1", bitrate=5000, name="openhd_stream"):
+    """H264 SW encode with detection overlay + RTP + UDP sink for OpenHD input.
+
+    Encodes AI-processed video (with hailooverlay bounding boxes) and sends it
+    to OpenHD via UDP RTP on the configured port. OpenHD receives with
+    create_input_custom_udp_rtp_port() (udpsrc on the same port).
+
+    Uses x264enc with ultrafast/zerolatency settings matching OpenHD's SW encoder.
+    RPi5 has no hardware H264 encoder; Hailo inference runs on the accelerator,
+    leaving CPU available for software encoding.
+
+    Args:
+        port (int): UDP port for OpenHD input (default: 5500).
+        host (str): Destination IP address (default: 127.0.0.1 for localhost).
+        bitrate (int): Target bitrate for x264enc in kbps (default: 5000).
+        name (str): Prefix name for pipeline elements.
+
+    Returns:
+        str: GStreamer pipeline string fragment.
+    """
+    encoder = (
+        f"x264enc name={name}_encoder bitrate={bitrate} "
+        f"speed-preset=ultrafast tune=zerolatency "
+        f"sliced-threads=false threads=2 key-int-max=5"
+    )
+    return (
+        f"{OVERLAY_PIPELINE(name=f'{name}_overlay')} ! "
+        f"{QUEUE(name=f'{name}_convert_q')} ! "
+        f"videoconvert n-threads=2 ! video/x-raw,format=I420 ! "
+        f"{QUEUE(name=f'{name}_enc_q')} ! "
+        f"{encoder} ! "
+        f"rtph264pay config-interval=1 pt=96 mtu=1440 ! "
+        f"udpsink host={host} port={port} sync=false async=false"
+    )
+
+
 def VIDEO_SHMSINK_PIPELINE(socket_path=None):
     """Creates a GStreamer pipeline string portion for shared memory video transfer using the shm plugins.
     Shmsink creates a shared memory segment and socket.

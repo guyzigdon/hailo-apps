@@ -204,6 +204,12 @@ def add_pipeline_args(parser: argparse.ArgumentParser) -> None:
     group = parser.add_argument_group("pipeline-adapter")
     group.add_argument("--tracking-lost-timeout", type=float, default=2.0,
                        help="Seconds to keep following a track ID after target leaves frame (default: 2.0)")
+    group.add_argument("--openhd-stream", action="store_true",
+                       help="Send overlay video to OpenHD via UDP RTP instead of display sink")
+    group.add_argument("--openhd-port", type=int, default=5500,
+                       help="OpenHD UDP input port (default: 5500)")
+    group.add_argument("--openhd-bitrate", type=int, default=5000,
+                       help="H264 encoding bitrate in kbps for OpenHD stream (default: 5000)")
 
 
 def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None, ui_fps=10,
@@ -296,16 +302,20 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
             # ByteTracker runs in Python instead.
             saved = self.enable_tracking
             self.enable_tracking = False
-            if not self._ui_enabled:
+
+            openhd_stream = getattr(self.options_menu, 'openhd_stream', False)
+
+            # If no custom output needed, delegate to parent
+            if not self._ui_enabled and not openhd_stream:
                 result = super().get_pipeline_string()
                 self.enable_tracking = saved
                 return result
             self.enable_tracking = saved
 
-            # Build pipeline with tee: one branch for display, one for MJPEG appsink
+            # Build pipeline with custom output (OpenHD stream and/or MJPEG UI)
             from hailo_apps.python.core.gstreamer.gstreamer_helper_pipelines import (
                 SOURCE_PIPELINE, INFERENCE_PIPELINE, USER_CALLBACK_PIPELINE,
-                TILE_CROPPER_PIPELINE,
+                TILE_CROPPER_PIPELINE, OPENHD_STREAM_PIPELINE,
             )
 
             source_pipeline = SOURCE_PIPELINE(
@@ -347,30 +357,39 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
 
             user_callback_pipeline = USER_CALLBACK_PIPELINE()
 
-            # Display branch (with overlay). Only disable when user passed --no-display.
-            no_display = getattr(self.options_menu, 'no_display', False)
-            if no_display:
-                display_branch = f"fakesink sync={self.sync}"
-            else:
-                display_branch = DISPLAY_PIPELINE(
-                    video_sink=self.video_sink, sync=self.sync, show_fps=self.show_fps,
+            # Primary output branch: OpenHD stream, display, or fakesink
+            if openhd_stream:
+                openhd_port = getattr(self.options_menu, 'openhd_port', 5500)
+                openhd_bitrate = getattr(self.options_menu, 'openhd_bitrate', 5000)
+                primary_branch = OPENHD_STREAM_PIPELINE(
+                    port=openhd_port, bitrate=openhd_bitrate,
                 )
+            else:
+                no_display = getattr(self.options_menu, 'no_display', False)
+                if no_display:
+                    primary_branch = f"fakesink sync={self.sync}"
+                else:
+                    primary_branch = DISPLAY_PIPELINE(
+                        video_sink=self.video_sink, sync=self.sync, show_fps=self.show_fps,
+                    )
 
-            # MJPEG branch (raw video, no overlay — React draws bboxes)
-            mjpeg_branch = (
-                f"videoconvert n-threads=2 ! "
-                f"videorate max-rate={self._ui_fps} ! "
-                f"video/x-raw,framerate={self._ui_fps}/1 ! "
-                f"jpegenc quality=70 ! "
-                f"appsink name=mjpeg_sink sync=false drop=true emit-signals=true"
-            )
-
-            # Tee splits into display + MJPEG
-            output_pipeline = (
-                f"tee name=ui_tee "
-                f"ui_tee. ! {QUEUE(name='display_branch_q')} ! {display_branch} "
-                f"ui_tee. ! {QUEUE(name='mjpeg_branch_q')} ! {mjpeg_branch}"
-            )
+            if self._ui_enabled:
+                # MJPEG branch (raw video, no overlay — React draws bboxes)
+                mjpeg_branch = (
+                    f"videoconvert n-threads=2 ! "
+                    f"videorate max-rate={self._ui_fps} ! "
+                    f"video/x-raw,framerate={self._ui_fps}/1 ! "
+                    f"jpegenc quality=70 ! "
+                    f"appsink name=mjpeg_sink sync=false drop=true emit-signals=true"
+                )
+                # Tee splits into primary + MJPEG
+                output_pipeline = (
+                    f"tee name=ui_tee "
+                    f"ui_tee. ! {QUEUE(name='primary_branch_q')} ! {primary_branch} "
+                    f"ui_tee. ! {QUEUE(name='mjpeg_branch_q')} ! {mjpeg_branch}"
+                )
+            else:
+                output_pipeline = primary_branch
 
             pipeline_parts = [source_pipeline, tile_cropper_pipeline]
             pipeline_parts.extend([user_callback_pipeline, output_pipeline])
