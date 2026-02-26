@@ -144,8 +144,10 @@ def main():
     except ImportError:
         from .pipeline_adapter import create_app
 
+    recordings_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "recordings")
     app = create_app(shared_state, target_state=target_state, eos_reached=eos_reached,
-                     ui_state=ui_state, ui_fps=ui_pre_args.ui_fps, parser=parser)
+                     ui_state=ui_state, ui_fps=ui_pre_args.ui_fps, parser=parser,
+                     record_dir=recordings_dir)
     args = app.options_menu
     _configure_logging(getattr(args, "log_verbosity", "normal"))
     _resolve_serial_connection(args)
@@ -158,23 +160,15 @@ def main():
     follow_server.start()
 
     # Start web UI server
-    video_recorder = None
     if ui_state is not None:
         static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ui", "build")
         web_server = WebServer(ui_state, target_state, shared_state,
                                controller_config=controller_config,
                                port=args.ui_port, static_dir=static_dir,
-                               follow_server_port=args.follow_server_port)
-        web_server.start()
+                               follow_server_port=args.follow_server_port,
+                               recording_ctl=app)
 
-        if ui_pre_args.record:
-            try:
-                from servers import VideoRecorder
-            except ImportError:
-                from .servers import VideoRecorder
-            recordings_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "recordings")
-            video_recorder = VideoRecorder(ui_state, output_dir=recordings_dir, fps=ui_pre_args.ui_fps)
-            video_recorder.start()
+        web_server.start()
 
     def _quit_pipeline():
         """Tell GStreamer to quit (safe to call multiple times)."""
@@ -216,6 +210,15 @@ def main():
     if hasattr(signal, "SIGTERM"):
         signal.signal(signal.SIGTERM, on_signal)
 
+    # Start recording from CLI flag after pipeline is running
+    if ui_pre_args.record and ui_state is not None:
+        # Schedule recording start after pipeline enters PLAYING state
+        def _start_recording_delayed():
+            import time as _time
+            _time.sleep(1.0)  # wait for pipeline to reach PLAYING
+            app.start_recording()
+        threading.Thread(target=_start_recording_delayed, daemon=True).start()
+
     # Run the GStreamer pipeline on the main thread (UI + Hailo start immediately)
     LOGGER.info("[app] Starting Hailo pipeline and UI on main thread")
     try:
@@ -225,8 +228,8 @@ def main():
     finally:
         if not shutdown.is_set():
             shutdown.set()
-        if video_recorder is not None:
-            video_recorder.stop()
+        if app.is_recording:
+            app.stop_recording()
         # Wait for drone thread to finish cleanly
         drone_thread.join(timeout=5.0)
         if web_server is not None:
