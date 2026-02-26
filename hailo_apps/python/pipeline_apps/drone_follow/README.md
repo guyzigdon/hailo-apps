@@ -38,7 +38,7 @@
 
 4. **Verify** the app parses and shows help:
    ```bash
-   python drone_follow.py --help
+   python drone_follow_app.py --help
    ```
 
 ## Instructions
@@ -56,12 +56,12 @@
 
 3. Run the video bridge:
    ```bash
-   python video_bridge.py
+   python tools/video_bridge.py
    ```
 
 4. Run the drone follow application:
    ```bash
-   python drone_follow.py --input udp://0.0.0.0:5600 --target-bbox-height 0.5
+   python drone_follow_app.py --input udp://0.0.0.0:5600 --target-bbox-height 0.5
    ```
 
 ### Key options (match the app)
@@ -86,7 +86,7 @@ Set the video/MAVLink host to the IP of the PC that will run drone_follow, then 
 PX4_VIDEO_HOST_IP=<MAVLINK_HOST_IP> make px4_sitl gz_x500_mono_cam
 ```
 
-Replace `<MAVLINK_HOST_IP>` with the IP address of the machine where you run `drone_follow.py`.
+Replace `<MAVLINK_HOST_IP>` with the IP address of the machine where you run `drone_follow_app.py`.
 
 **2. (Optional) Persistent MAVLink config on PX4**
 
@@ -101,7 +101,7 @@ mavlink start -t <MAVLINK_HOST_IP> -o 14560 -r 100000
 Run the app so it listens for video on UDP 5600 and MAVLink on UDP 14560:
 
 ```bash
-python drone_follow.py --input udp://0.0.0.0:5600 --connection udp://0.0.0.0:14560 --target-bbox-height 0.5
+python drone_follow_app.py --input udp://0.0.0.0:5600 --connection udp://0.0.0.0:14560 --target-bbox-height 0.5
 ```
 
 Ensure the video bridge (or PX4 video stream) and MAVLink are sent to this machine’s IP; use the same ports (5600 for video, 14560 for MAVLink) on the simulation side.
@@ -141,7 +141,7 @@ When running with `--enable-tracking`, you can select a specific person to follo
 
 1. Run with tracking enabled:
    ```bash
-   python drone_follow.py --input udp://0.0.0.0:5600 --target-bbox-height 0.5 --enable-tracking
+   python drone_follow_app.py --input udp://0.0.0.0:5600 --target-bbox-height 0.5 --enable-tracking
    ```
 
 2. Check which people are visible:
