@@ -9,7 +9,7 @@ The parser is assembled here from each domain's add_*_args() function,
 so no module sees arguments it doesn't own.
 
 Usage:
-    python drone_follow.py --input rpi  # live mode with camera + drone
+    python drone_follow_app.py --input rpi  # live mode with camera + drone
 
 Pipeline options (--input, --input-codec, etc.) are passed through to the tiling pipeline.
 """
