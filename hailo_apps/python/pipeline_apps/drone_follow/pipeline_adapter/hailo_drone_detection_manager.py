@@ -451,7 +451,7 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
                 f"valve name=record_valve drop=true ! "
                 f"videoconvert n-threads=2 ! "
                 f"x264enc tune=zerolatency bitrate=5000 speed-preset=ultrafast ! "
-                f"matroskamux ! filesink name=record_sink location={default_record_path}"
+                f"matroskamux ! filesink name=record_sink async=false location={default_record_path}"
             )
 
             # Tee splits into display + MJPEG + recording
