@@ -488,12 +488,9 @@ async def _cancel_task(task: asyncio.Task) -> None:
 # ---------------------------------------------------------------------------
 
 async def run_live_drone(args, shared_state, shutdown, shutdown_read_fd=None,
-                         takeoff_done=None, pipeline_quit_cb=None, config=None, ui_state=None):
+                         config=None, ui_state=None):
     """Connect to drone and run live control loop with Hailo detections.
 
-    If takeoff_done is a threading.Event, it is set after takeoff and offboard start,
-    so the Hailo pipeline can wait before starting.
-    If pipeline_quit_cb is set, it is called at shutdown start so the pipeline stops first.
     If config is provided, use it directly (allows live mutation from web UI).
     If ui_state is provided, logs are pushed to the web UI.
     """
@@ -546,9 +543,6 @@ async def run_live_drone(args, shared_state, shutdown, shutdown_read_fd=None,
         if manage_takeoff_landing:
             await asyncio.sleep(3)
 
-        if takeoff_done is not None:
-            takeoff_done.set()
-
         altitude_cache: dict = {}
         alt_task = asyncio.create_task(_telemetry_altitude_task(drone, altitude_cache, shutdown))
         control_task = asyncio.create_task(
@@ -584,9 +578,4 @@ async def run_live_drone(args, shared_state, shutdown, shutdown_read_fd=None,
             if manage_takeoff_landing:
                 await _land_safely(drone, vel_api)
             await _cancel_task(control_task)
-            if pipeline_quit_cb is not None:
-                try:
-                    pipeline_quit_cb()
-                except Exception:
-                    pass
         LOGGER.info("[drone] Done.")

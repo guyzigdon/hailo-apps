@@ -173,17 +173,19 @@ def main():
         from servers.web_server import _WebHandler
         _WebHandler.screen_recorder = screen_recorder
 
-    takeoff_done = threading.Event()
-
     def _eos_to_shutdown():
         eos_reached.wait()
         shutdown.set()
     threading.Thread(target=_eos_to_shutdown, daemon=True).start()
 
+    def _quit_pipeline():
+        """Tell GStreamer to quit (safe to call multiple times)."""
+        try:
+            app.loop.quit()
+        except Exception:
+            pass
+
     def run_pipeline():
-        takeoff_done.wait()
-        if shutdown.is_set():
-            return
         try:
             app.run()
         except SystemExit:
@@ -194,8 +196,14 @@ def main():
     def on_signal(*_):
         if not shutdown.is_set():
             shutdown.set()
-            takeoff_done.set()
             LOGGER.warning("[drone] Ctrl+C received, shutting down...")
+            _quit_pipeline()
+
+    # Register signal handlers at module level so they survive the asyncio loop
+    signal.signal(signal.SIGINT, on_signal)
+    if hasattr(signal, "SIGTERM"):
+        signal.signal(signal.SIGTERM, on_signal)
+
     try:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
@@ -203,25 +211,35 @@ def main():
             for sig in (signal.SIGINT, signal.SIGTERM):
                 loop.add_signal_handler(sig, on_signal)
         except NotImplementedError:
-            signal.signal(signal.SIGINT, on_signal)
-            if hasattr(signal, "SIGTERM"):
-                signal.signal(signal.SIGTERM, on_signal)
+            pass  # already registered above
         loop.run_until_complete(
             run_live_drone(args, shared_state, shutdown,
-                          takeoff_done=takeoff_done, pipeline_quit_cb=app.loop.quit,
                           config=controller_config, ui_state=ui_state))
     except KeyboardInterrupt:
         if not shutdown.is_set():
             shutdown.set()
-        takeoff_done.set()
         LOGGER.warning("[drone] Shutdown.")
+        _quit_pipeline()
+    except Exception:
+        LOGGER.warning("[drone] Drone connection failed — pipeline continues without drone control.", exc_info=True)
     finally:
         if screen_recorder is not None:
             screen_recorder.stop()
+        if shutdown.is_set():
+            _quit_pipeline()
+        # Wait for pipeline; stay responsive to Ctrl+C
+        try:
+            while pipeline_thread.is_alive():
+                pipeline_thread.join(timeout=1.0)
+        except KeyboardInterrupt:
+            if not shutdown.is_set():
+                shutdown.set()
+            LOGGER.warning("[drone] Ctrl+C received, shutting down...")
+            _quit_pipeline()
+            pipeline_thread.join(timeout=5.0)
         if web_server is not None:
             web_server.stop()
         follow_server.stop()
-        pipeline_thread.join(timeout=5.0)
 
 
 if __name__ == "__main__":
