@@ -135,7 +135,7 @@ def app_callback(element, buffer, user_data):
             _maybe_clear_target_after_lost(user_data)
         _update_ui(ui_state, [], {}, target_state.get_target() if target_state else None)
         if target_state is None or target_state.get_target() is None:
-            LOGGER.info("[SEARCH MODE] No person detected in frame - follow state cleared")
+            LOGGER.debug("[SEARCH MODE] No person detected in frame - follow state cleared")
         return
 
     available_ids, person_by_id, person_to_id = _run_tracker(
@@ -157,7 +157,7 @@ def app_callback(element, buffer, user_data):
             _maybe_clear_target_after_lost(user_data)
             _update_ui(ui_state, persons, person_to_id, target_state.get_target())
             if target_state.get_target() is None:
-                LOGGER.info("[SEARCH MODE] Target ID %s not in frame. Available: %s - follow state cleared",
+                LOGGER.debug("[SEARCH MODE] Target ID %s not in frame. Available: %s - follow state cleared",
                             target_id, sorted(available_ids) if available_ids else "none")
             return
     else:
@@ -187,7 +187,7 @@ def app_callback(element, buffer, user_data):
                target_state.get_target() if target_state else None)
 
     available_str = f"Available: {sorted(available_ids)}" if available_ids else ""
-    LOGGER.info("[FOLLOWING %s] conf=%.2f center=(%.2f,%.2f) h=%.2f %s",
+    LOGGER.debug("[FOLLOWING %s] conf=%.2f center=(%.2f,%.2f) h=%.2f %s",
                 follow_mode, best.get_confidence(), cx, cy, bbox.height(), available_str)
 
 
