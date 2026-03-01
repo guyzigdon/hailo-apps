@@ -168,7 +168,7 @@ class GStreamerPaddleOCRApp(GStreamerApp):
             video_height=self.video_height,
             frame_rate=self.frame_rate,
             sync=self.sync,
-            mirror_image=False,
+            horizontal_mirror=False,
         )
 
         # 2. OCR Detection pipeline - detects text regions (bounding boxes)
