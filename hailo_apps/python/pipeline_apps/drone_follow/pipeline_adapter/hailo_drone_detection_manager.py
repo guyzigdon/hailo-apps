@@ -232,7 +232,7 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
     )
     from hailo_apps.python.core.common.core import get_pipeline_parser
     from hailo_apps.python.core.gstreamer.gstreamer_helper_pipelines import (
-        QUEUE, DISPLAY_PIPELINE,
+        QUEUE, DISPLAY_PIPELINE, OVERLAY_PIPELINE,
     )
 
     if parser is None:
@@ -449,6 +449,7 @@ def create_app(shared_state, target_state=None, eos_reached=None, ui_state=None,
             default_record_path = self._generate_record_path()
             record_branch = (
                 f"valve name=record_valve drop=true ! "
+                f"{OVERLAY_PIPELINE(name='record_overlay')} ! "
                 f"videoconvert n-threads=2 ! "
                 f"x264enc tune=zerolatency bitrate=5000 speed-preset=ultrafast ! "
                 f"matroskamux ! filesink name=record_sink async=false location={default_record_path}"
