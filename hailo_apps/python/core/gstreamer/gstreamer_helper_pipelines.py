@@ -51,6 +51,8 @@ def get_source_type(input_source):
         return "ximage"
     elif input_source.startswith('rtsp://'):
         return 'rtsp'
+    elif input_source.startswith('udp://'):
+        return 'udp'
     else:
         return "file"
 
@@ -166,6 +168,17 @@ def SOURCE_PIPELINE(
             f'decodebin name={name}_decodebin ! '
             f'{horizontal_mirror_str}'
             f'{vertical_mirror_str}'
+        )
+    elif source_type == 'udp':  # UDP stream handling (e.g., Gazebo camera)
+        # Extract port from udp://host:port or udp://:port
+        port = video_source.split(':')[-1]
+        source_element = (
+            f'udpsrc port={port} name={name} ! '
+            f'application/x-rtp, encoding-name=H264, payload=96 ! '
+            f'{QUEUE(name=f"{name}_queue_decode")} ! '
+            f'rtph264depay ! '
+            f'h264parse ! '
+            f'avdec_h264 name={name}_decodebin ! '
         )
     else:
         source_element = (
