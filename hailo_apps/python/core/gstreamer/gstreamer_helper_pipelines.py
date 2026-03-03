@@ -664,7 +664,6 @@ def OPENHD_STREAM_PIPELINE(port=5500, host="127.0.0.1", bitrate=5000, name="open
         f"sliced-threads=false threads=2 key-int-max=5"
     )
     return (
-        f"{OVERLAY_PIPELINE(name=f'{name}_overlay')} ! "
         f"{QUEUE(name=f'{name}_convert_q')} ! "
         f"videoconvert n-threads=2 ! video/x-raw,format=I420 ! "
         f"{QUEUE(name=f'{name}_enc_q')} ! "
