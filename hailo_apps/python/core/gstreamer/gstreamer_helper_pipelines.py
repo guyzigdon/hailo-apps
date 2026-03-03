@@ -43,6 +43,8 @@ def get_source_type(input_source):
         return 'rtsp'
     elif input_source.startswith('udp://'):
         return 'udp'
+    elif input_source.startswith('shm'):
+        return 'shm'
     else:
         return "file"
 
@@ -172,6 +174,20 @@ def SOURCE_PIPELINE(
             f'avdec_h264 name={name}_decodebin ! '
             f'{horizontal_mirror_str}'
             f'{vertical_mirror_str}'
+        )
+    elif source_type == 'shm':  # Shared memory from OpenHD raw NV12 passthrough
+        socket_path = "/tmp/openhd_raw_video"
+        if '://' in video_source:
+            socket_path = video_source.split('://', 1)[1]
+        # shmsrc buffers are read-only (mmap'd shared memory).
+        # Force an immediate NV12→I420 conversion to create writable buffers.
+        # NV12→I420 is cheap (just UV plane deinterleave) and can never be
+        # passthrough since the memory layouts differ.
+        # --width/--height MUST match the OpenHD camera resolution exactly.
+        source_element = (
+            f'shmsrc socket-path={socket_path} do-timestamp=true is-live=true name={name} ! '
+            f'video/x-raw,format=NV12,width={video_width},height={video_height},framerate={frame_rate}/1,pixel-aspect-ratio=1/1 ! '
+            f'videoconvert ! video/x-raw,format=I420 ! '
         )
     else:
         # File source handling
